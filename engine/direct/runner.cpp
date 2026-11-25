@@ -23,6 +23,8 @@
 #include "mm_q6k_h.h"
 #include "mv_q4k.h"
 #include "mv_q6k.h"
+#include "mvt_q4k.h"
+#include "mvt_q6k.h"
 #include "ops.h"
 #include "prefill.h"
 
@@ -729,6 +731,9 @@ bool Runner::init(Model& m, int n_ctx, std::string& err) {
         std::string e;
         batch_ok_ = !opt.fused && init_batch(e);
         big_ok_ = batch_ok_ && init_big(e);
+        std::string ve;
+        verify_ok_ = !opt.fused && init_verify(ve);
+        if (!verify_ok_ && !ve.empty()) std::fprintf(stderr, "direct: no verify pass (%s)\n", ve.c_str());
         if (!batch_ok_ && !e.empty()) std::fprintf(stderr, "direct: prompts a token at a time (%s)\n", e.c_str());
     }
     return true;
@@ -886,6 +891,166 @@ void Runner::add_profile(std::vector<double>& acc) const {
     const uint32_t* idv = (const uint32_t*)bstamp_.cpu + 2048;
     acc.resize(S_COUNT, 0.0);
     for (int j = 1; j < nstamps_; j++) acc[idv[j]] += (T[j] - T[j - 1]) / 100e6;
+}
+
+// ---- speculative decoding's verify pass (round 100)
+
+// mvt row slots a wave: TS5_DIRECT_MVT_K (4 or 8) for tests, else 8.
+static int mvt_k() {
+    static const int k = std::getenv("TS5_DIRECT_MVT_K") && std::atoi(std::getenv("TS5_DIRECT_MVT_K")) == 4 ? 4 : 8;
+    return k;
+}
+
+Runner::Prog* Runner::mvt_prog(const Weight& w, int T, int K) {
+    const uint64_t key = (uint64_t)K << 56 | (uint64_t)T << 48 | (uint64_t)w.type() << 32 | (uint64_t)w.ne0();
+    auto it = mvts_.find(key);
+    if (it != mvts_.end()) return &it->second;
+    if (w.ne0() % 2048) return nullptr;
+    std::string src;
+    if (w.type() == GGML_Q4_K) src = gen_mvt_q4k((int)w.ne0(), T, K);
+    else if (w.type() == GGML_Q6_K) src = gen_mvt_q6k((int)w.ne0(), T, K);
+    if (src.empty()) return nullptr;
+    Prog& p = mvts_[key];
+    std::string e;
+    if (!load(src, p, e)) {
+        std::fprintf(stderr, "direct: multi-token mat-vec: %s\n", e.c_str());
+        mvts_.erase(key);
+        return nullptr;
+    }
+    return &p;
+}
+
+bool Runner::init_verify(std::string& err) {
+    if (std::getenv("TS5_DIRECT_VERIFY") && std::atoi(std::getenv("TS5_DIRECT_VERIFY")) == 0) return false;
+    const HParams& hp = m_->hp;
+    const Weight& outw = m_->output ? m_->output : m_->tok_embd;
+    for (int T = 2; T <= kVerify; T++) {
+        for (int l = 0; l < hp.n_layer; l++) {
+            const Layer& L = m_->layers[l];
+            for (const Weight* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down})
+                if (!mvt_prog(*w, T, mvt_k())) { err = "a weight the multi-token mat-vecs don't take"; return false; }
+        }
+        if (!mvt_prog(outw, T, mvt_k())) { err = "the output weight"; return false; }
+    }
+    const size_t T = kVerify;
+    for (auto pr : {std::make_pair(&vx_, T * E_ * 4), std::make_pair(&vxn_, T * E_ * 4), std::make_pair(&vq_, T * NQ_ * HD_ * 4),
+                    std::make_pair(&vk_, T * NKV_ * HD_ * 4), std::make_pair(&vv_, T * NKV_ * HD_ * 4), std::make_pair(&vatt_, T * NQ_ * HD_ * 4),
+                    std::make_pair(&vt_, T * E_ * 4), std::make_pair(&vg_, T * F_ * 4), std::make_pair(&vu_, T * F_ * 4),
+                    std::make_pair(&vh_, T * F_ * 4), std::make_pair(&vlog_, T * V_ * 4 + 4096), std::make_pair(&vpart_, T * 64 * NKV_ * 2112)})
+        if (!dev_.alloc((pr.second + 4095) & ~(size_t)4095, kfd::Mem::Gtt, *pr.first)) { err = dev_.err() + " (verify activations)"; return false; }
+    return true;
+}
+
+bool Runner::send_verify(const int32_t* ids, int n, int pos0) {
+    if (!verify_ok_ || n < 2 || n > kVerify || pos0 < 0 || pos0 + n > ctx_) return false;
+    pm4::Stream s;
+    build_verify(ids, n, pos0, seq_, s);
+    seq_++;
+    return dev_.submit(s.w);
+}
+
+// build()'s steps for T tokens: the same small kernels with the same
+// arguments, once per token (each on its own copy of the activations), and
+// mvt for every mat-vec, so each token's numbers are what build() makes.
+void Runner::build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4::Stream& s) {
+    const HParams& hp = m_->hp;
+    auto barrier = [&]() {
+        s.wait_kernels();
+        if (opt.light) s.acquire_light();
+    };
+    const uint32_t t256[3] = {256, 1, 1}, t64[3] = {64, 1, 1}, t128[3] = {128, 1, 1};
+    const size_t xE = (size_t)E_ * 4, xA = (size_t)NQ_ * HD_ * 4, xKV = (size_t)NKV_ * HD_ * 4, xF = (size_t)F_ * 4, pb = (size_t)64 * NKV_ * 2112;
+    auto mvt = [&](const Weight& w, uint64_t x, size_t xs, uint64_t y, size_t ys) {
+        const int K = mvt_k();
+        Prog* p = mvt_prog(w, T, K);
+        const uint32_t rows = (uint32_t)w.ne1();
+        const uint32_t nw = wgs_ * 8;   // one workgroup a CU, passes over the rows (mvt_q4k.h)
+        const uint64_t a = addr(w.data);
+        const uint32_t args[10] = {lo(a), hi(a), lo(x), hi(x), lo(y), hi(y), rows, (uint32_t)xs, nw, (uint32_t)ys};
+        const uint32_t g[3] = {wgs_, 1, 1};
+        s.dispatch(p->k, p->code.gpu, args, 10, g, t256);
+    };
+    auto norm = [&](bool add, const Weight& w) {
+        const Prog& p = add ? k_addnorm_ : k_norm_;
+        const uint64_t a = addr(w.data);
+        for (int t = 0; t < T; t++) {
+            const uint64_t x = vx_.gpu + t * xE, xn = vxn_.gpu + t * xE, tt = vt_.gpu + t * xE;
+            const uint32_t args[8] = {lo(x), hi(x), lo(a), hi(a), lo(xn), hi(xn), lo(tt), hi(tt)};
+            const uint32_t g[3] = {1, 1, 1};
+            s.dispatch(p.k, p.code.gpu, args, 8, g, t256);
+        }
+    };
+    if (seq == 0) s.acquire_all();
+    else barrier();
+    s.stamp(bts_.gpu + 16 * (seq % (bts_.size / 16)));
+    for (int t = 0; t < T; t++) {
+        const uint64_t te = addr(m_->tok_embd.data), io = bids_.gpu + 4 * (size_t)(pos0 + t), x = vx_.gpu + t * xE;
+        const uint32_t args[10] = {lo(te), hi(te), lo(x), hi(x), lo(bslot_.gpu), hi(bslot_.gpu), (uint32_t)ids[t], 0, lo(io), hi(io)};
+        const uint32_t g[3] = {1, 1, 1}, th[3] = {(uint32_t)(E_ / 16), 1, 1};
+        s.dispatch(k_embed_.k, k_embed_.code.gpu, args, 10, g, th);
+    }
+    barrier();
+    for (int l = 0; l < hp.n_layer; l++) {
+        const Layer& L = m_->layers[l];
+        const uint64_t kc = bkv_.gpu + (size_t)l * 2 * kv_layer_, vc = kc + kv_layer_;
+        if (l) barrier();
+        norm(l > 0, L.attn_norm);
+        barrier();
+        mvt(L.wq, vxn_.gpu, xE, vq_.gpu, xA);
+        mvt(L.wk, vxn_.gpu, xE, vk_.gpu, xKV);
+        mvt(L.wv, vxn_.gpu, xE, vv_.gpu, xKV);
+        barrier();
+        for (int t = 0; t < T; t++) {
+            const int pos = pos0 + t;
+            const uint64_t q = vq_.gpu + t * xA, k = vk_.gpu + t * xKV, v = vv_.gpu + t * xKV;
+            const uint64_t qn = addr(L.q_norm.data), kn = addr(L.k_norm.data), rr = brope_.gpu + (size_t)pos * 512;
+            const uint64_t kr = kc + (size_t)pos * NKV_ * HD_ * 2, vr = vc + (size_t)pos * NKV_ * HD_ * 2;
+            const uint32_t args[16] = {lo(q),  hi(q),  lo(k),  hi(k),  lo(v),  hi(v),  lo(qn), hi(qn),
+                                       lo(kn), hi(kn), lo(rr), hi(rr), lo(kr), hi(kr), lo(vr), hi(vr)};
+            const uint32_t g[3] = {(uint32_t)(NQ_ + NKV_), 1, 1};
+            s.dispatch(k_qk_.k, k_qk_.code.gpu, args, 16, g, t64);
+        }
+        barrier();
+        for (int t = 0; t < T; t++) {
+            const uint32_t n = pos0 + t + 1, nch = (n + 255) / 256, per = (nch + dsplits() - 1) / dsplits(), splits = (nch + per - 1) / per;
+            const uint64_t q = vq_.gpu + t * xA, part = vpart_.gpu + t * pb;
+            const uint32_t a1[12] = {lo(q), hi(q), lo(kc), hi(kc), lo(vc), hi(vc), n, scale_bits_, lo(part), hi(part), per * 256, 0};
+            const uint32_t g1[3] = {splits * NKV_, 1, 1};
+            if (!opt.dattn_old && NQ_ == 32) s.dispatch(k_attnd_.k, k_attnd_.code.gpu, a1, 12, g1, t128);
+            else s.dispatch(k_attn_.k, k_attn_.code.gpu, a1, 12, g1, t256);
+        }
+        barrier();
+        for (int t = 0; t < T; t++) {
+            const uint32_t n = pos0 + t + 1, nch = (n + 255) / 256, per = (nch + dsplits() - 1) / dsplits(), splits = (nch + per - 1) / per;
+            const uint64_t part = vpart_.gpu + t * pb, out = vatt_.gpu + t * xA;
+            const uint32_t a2[10] = {lo(part), hi(part), lo(out), hi(out), splits, 0, 0, 0, 0, 0};
+            const uint32_t g2[3] = {(uint32_t)NKV_, 1, 1};
+            s.dispatch(k_red_.k, k_red_.code.gpu, a2, 10, g2, t256);
+        }
+        barrier();
+        mvt(L.wo, vatt_.gpu, xA, vt_.gpu, xE);
+        barrier();
+        norm(true, L.ffn_norm);
+        barrier();
+        mvt(L.w_gate, vxn_.gpu, xE, vg_.gpu, xF);
+        mvt(L.w_up, vxn_.gpu, xE, vu_.gpu, xF);
+        barrier();
+        {
+            const uint32_t args[6] = {lo(vg_.gpu), hi(vg_.gpu), lo(vu_.gpu), hi(vu_.gpu), lo(vh_.gpu), hi(vh_.gpu)};
+            const uint32_t g[3] = {(uint32_t)((size_t)T * F_ / 1024), 1, 1};
+            s.dispatch(k_silu_.k, k_silu_.code.gpu, args, 6, g, t256);
+        }
+        barrier();
+        mvt(L.w_down, vh_.gpu, xF, vt_.gpu, xE);
+    }
+    barrier();
+    norm(true, m_->out_norm);
+    barrier();
+    mvt(m_->output ? m_->output : m_->tok_embd, vxn_.gpu, xE, vlog_.gpu, (size_t)V_ * 4);
+    barrier();
+    s.release(bts_.gpu + 16 * (seq % (bts_.size / 16)) + 8, 0, true);
+    s.release(dev_.signals.gpu, seq + 1);
+    nstamps_ = 0;
 }
 
 }  // namespace ts5::direct

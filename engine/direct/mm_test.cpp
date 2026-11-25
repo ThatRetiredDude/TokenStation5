@@ -617,7 +617,7 @@ int cmd_mvt_test(int argc, char** argv) {
     for (int i = 2; i < argc; i++) Ts.push_back(std::atoi(argv[i]));
     if (Ts.empty()) Ts = {2, 3, 4};
     kfd::Device dev;
-    if (!dev.open() || !dev.create_queue(1 << 20)) { std::fprintf(stderr, "mvt-test: %s\n", dev.err().c_str()); return 1; }
+    if (!dev.open() || !dev.create_queue(1 << 22)) { std::fprintf(stderr, "mvt-test: %s\n", dev.err().c_str()); return 1; }
     uint64_t* sig = (uint64_t*)dev.signals.cpu;
     uint64_t seq = 0;
     sig[0] = 0;
@@ -628,6 +628,7 @@ int cmd_mvt_test(int argc, char** argv) {
                             {"v 1024x4096 Q6_K", true, 1024, 4096}, {"down 4096x12288 Q6_K", true, 4096, 12288},
                             {"output 32768x4096 Q6_K", true, 32768, 4096}};
     const size_t maxw = (size_t)32768 * 4096 / 256 * 210 + 64;
+    const uint64_t kCodeT = 512 * 1024;   // the multi-token kernel's code, after the one-token kernel's
     kfd::Buffer ts, code, w, x, y1, y2;
     if (!dev.alloc(4096, kfd::Mem::Gtt, ts) || !dev.alloc(1 << 20, kfd::Mem::Gtt, code) || !dev.alloc(maxw, kfd::Mem::Gtt, w) ||
         !dev.alloc((size_t)8 * 12288 * 4, kfd::Mem::Gtt, x) || !dev.alloc((size_t)8 * 32768 * 4, kfd::Mem::Gtt, y1) ||
@@ -638,27 +639,46 @@ int cmd_mvt_test(int argc, char** argv) {
     uint32_t r = 777;
     auto rnd = [&]() { r = r * 1664525u + 1013904223u; return r; };
     for (size_t i = 0; i < (size_t)8 * 12288; i++) ((float*)x.cpu)[i] = (float)((int)(rnd() >> 16 & 0xffff) - 32768) / 32768.0f;
-    auto run = [&](const gfx10::Kernel& k, const uint32_t* args, uint32_t groups, double* sec) -> bool {
-        std::memcpy(code.cpu, k.code.data(), k.code.size() * 4);
-        std::vector<double> st;
-        for (int rep = 0; rep < 6; rep++) {
-            pm4::Stream s;
-            s.acquire_all();
-            s.release(ts.gpu, 0, true);
-            const uint32_t g[3] = {groups, 1, 1}, th[3] = {256, 1, 1};
-            s.dispatch(k, code.gpu, args, 10, g, th);
-            s.wait_kernels();
-            s.release(ts.gpu + 8, 0, true);
-            s.release(dev.signals.gpu, ++seq);
-            if (!dev.submit(s.w) || !dev.wait((volatile uint64_t*)sig, seq, 20000)) { std::fprintf(stderr, "mvt-test: %s\n", dev.err().c_str()); return false; }
-            const uint64_t* tt = (const uint64_t*)ts.cpu;
-            if (rep) st.push_back((tt[1] - tt[0]) / 100e6);
+    const uint32_t t256[3] = {256, 1, 1};
+    auto submit = [&](pm4::Stream& s) -> bool {
+        s.release(dev.signals.gpu, ++seq);
+        if (!dev.submit(s.w) || !dev.wait((volatile uint64_t*)sig, seq, 20000)) { std::fprintf(stderr, "mvt-test: %s\n", dev.err().c_str()); return false; }
+        return true;
+    };
+    // one dispatch as the runner sends it: then wait, then the CU caches invalidated
+    auto one = [&](pm4::Stream& s, const gfx10::Kernel& k, uint64_t at, const uint32_t* args, uint32_t groups) {
+        const uint32_t g[3] = {groups, 1, 1};
+        s.dispatch(k, code.gpu + at, args, 10, g, t256);
+        s.wait_kernels();
+        s.acquire_light();
+    };
+    // Round 99's timings were a single cold launch each with a flushing
+    // start stamp (one-token runs read 7 us at any size). Now: the clock
+    // warmed first (it ramps from idle over 50-100 ms), then in one stream
+    // 30 warm-up rounds, 50 x (T one-token runs) between two stamps, 50 x
+    // (one T-token run) between the next two: the same clock for both.
+    auto timed = [&](const gfx10::Kernel& km, const uint32_t* am, const gfx10::Kernel& kt, const uint32_t* at, uint32_t gt, int T,
+                     double* t_one, double* t_multi) -> bool {
+        pm4::Stream s;
+        s.acquire_all();
+        for (int i = 0; i < 30; i++) {
+            for (int t = 0; t < T; t++) one(s, km, 0, am, wgs);
+            one(s, kt, kCodeT, at, gt);
         }
-        std::sort(st.begin(), st.end());
-        *sec = st[st.size() / 2];
+        s.stamp(ts.gpu);
+        for (int i = 0; i < 50; i++)
+            for (int t = 0; t < T; t++) one(s, km, 0, am, wgs);
+        s.stamp(ts.gpu + 8);
+        for (int i = 0; i < 50; i++) one(s, kt, kCodeT, at, gt);
+        s.stamp(ts.gpu + 16);
+        if (!submit(s)) return false;
+        const uint64_t* tt = (const uint64_t*)ts.cpu;
+        *t_one = (tt[1] - tt[0]) / 100e6 / 50 / T;
+        *t_multi = (tt[2] - tt[1]) / 100e6 / 50;
         return true;
     };
     int bad = 0;
+    bool warm = false;
     for (const Shape& sh : shapes) {
         const int bb = sh.q6 ? 210 : 144;
         const size_t wb = (size_t)sh.rows * sh.cols / 256 * bb;
@@ -673,27 +693,40 @@ int cmd_mvt_test(int argc, char** argv) {
         gfx10::Kernel km;
         std::string err;
         if (!gfx10::assemble(sh.q6 ? gen_mv_q6k(sh.cols) : gen_mv_q4k(sh.cols, "", 0, 1, true), km, &err)) { std::fprintf(stderr, "mvt-test: %s\n", err.c_str()); return 1; }
-        double t1 = 0;
-        for (int t = 0; t < 8; t++) {   // the one-token results for up to 8 tokens
-            const uint64_t xa = x.gpu + (size_t)t * sh.cols * 4, ya = y1.gpu + (size_t)t * sh.rows * 4;
-            const uint32_t args[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)xa, (uint32_t)(xa >> 32), (uint32_t)ya, (uint32_t)(ya >> 32),
-                                       (uint32_t)sh.rows, 0, wgs * 8, 0};
-            double sec;
-            if (!run(km, args, wgs, &sec)) return 1;
-            if (!t) t1 = sec;
+        std::memcpy(code.cpu, km.code.data(), km.code.size() * 4);
+        const uint32_t am[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)x.gpu, (uint32_t)(x.gpu >> 32), (uint32_t)y1.gpu, (uint32_t)(y1.gpu >> 32),
+                                 (uint32_t)sh.rows, 0, wgs * 8, 0};
+        {
+            pm4::Stream s;   // the one-token results for up to 8 tokens
+            s.acquire_all();
+            for (int t = 0; t < 8; t++) {
+                const uint64_t xa = x.gpu + (size_t)t * sh.cols * 4, ya = y1.gpu + (size_t)t * sh.rows * 4;
+                const uint32_t args[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)xa, (uint32_t)(xa >> 32), (uint32_t)ya, (uint32_t)(ya >> 32),
+                                           (uint32_t)sh.rows, 0, wgs * 8, 0};
+                one(s, km, 0, args, wgs);
+            }
+            if (!warm)   // ~150 ms of work first, so the clock is up
+                for (int i = 0; i < 2000; i++) one(s, km, 0, am, wgs);
+            warm = true;
+            if (!submit(s)) return 1;
         }
-        std::printf("mvt-test %-24s one token: %7.1f us (%.0f GB/s)\n", sh.name, t1 * 1e6, wb / t1 / 1e9);
+        double base = 0;
         for (int T : Ts)
             for (int K : {4, 8}) {
                 const std::string src = sh.q6 ? gen_mvt_q6k(sh.cols, T, K) : gen_mvt_q4k(sh.cols, T, K);
                 gfx10::Kernel kt;
                 if (src.empty() || !gfx10::assemble(src, kt, &err)) { std::fprintf(stderr, "mvt-test: T %d K %d: %s\n", T, K, err.c_str()); return 1; }
-                const uint32_t nw = std::max(wgs * 8, (uint32_t)((sh.rows + K - 1) / K + 7) / 8 * 8);
-                const uint32_t args[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)x.gpu, (uint32_t)(x.gpu >> 32), (uint32_t)y2.gpu, (uint32_t)(y2.gpu >> 32),
-                                           (uint32_t)sh.rows, (uint32_t)(sh.cols * 4), nw, (uint32_t)(sh.rows * 4)};
+                std::memcpy((char*)code.cpu + kCodeT, kt.code.data(), kt.code.size() * 4);
+                const uint32_t nw = wgs * 8;
+                const uint32_t at[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)x.gpu, (uint32_t)(x.gpu >> 32), (uint32_t)y2.gpu, (uint32_t)(y2.gpu >> 32),
+                                         (uint32_t)sh.rows, (uint32_t)(sh.cols * 4), nw, (uint32_t)(sh.rows * 4)};
                 std::memset(y2.cpu, 0xff, (size_t)T * sh.rows * 4);
-                double sec;
-                if (!run(kt, args, nw / 8, &sec)) return 1;
+                {
+                    pm4::Stream s;
+                    s.acquire_all();
+                    one(s, kt, kCodeT, at, wgs);
+                    if (!submit(s)) return 1;
+                }
                 size_t diff = 0;
                 for (int t = 0; t < T; t++)
                     diff += std::memcmp((const char*)y1.cpu + (size_t)t * sh.rows * 4, (const char*)y2.cpu + (size_t)t * sh.rows * 4, (size_t)sh.rows * 4) != 0;
@@ -701,10 +734,17 @@ int cmd_mvt_test(int argc, char** argv) {
                 for (size_t i = 0; i < (size_t)T * sh.rows && first < 0; i++)
                     if (((const uint32_t*)y1.cpu)[i] != ((const uint32_t*)y2.cpu)[i]) first = (int)i;
                 bad += diff != 0;
-                std::printf("mvt-test %-24s T %d K %d: %7.1f us = %.2fx one token (%d tokens' outputs differ%s), %d VGPRs, %zu bytes, %u workgroups\n", sh.name, T, K,
-                            sec * 1e6, sec / t1, (int)diff, first >= 0 ? (", first at " + std::to_string(first) + ": " + std::to_string(((const float*)y1.cpu)[first]) + " vs " +
-                                                                                   std::to_string(((const float*)y2.cpu)[first])).c_str() : "",
-                            kt.vgprs, kt.code.size() * 4, nw / 8);
+                double t1 = 0, tm = 0;
+                if (!timed(km, am, kt, at, wgs, T, &t1, &tm)) return 1;
+                if (!base) {
+                    base = t1;
+                    std::printf("mvt-test %-24s one token: %7.1f us (%.0f GB/s)\n", sh.name, t1 * 1e6, wb / t1 / 1e9);
+                }
+                std::printf("mvt-test %-24s T %d K %d: %7.1f us = %.2fx one token (%.1f us beside it, %.2f of %d one-token runs) (%d tokens' outputs differ%s), %d VGPRs, %zu bytes\n",
+                            sh.name, T, K, tm * 1e6, tm / t1, t1 * 1e6, tm / t1 / T, T, (int)diff,
+                            first >= 0 ? (", first at " + std::to_string(first) + ": " + std::to_string(((const float*)y1.cpu)[first]) + " vs " +
+                                          std::to_string(((const float*)y2.cpu)[first])).c_str() : "",
+                            kt.vgprs, kt.code.size() * 4);
                 std::fflush(stdout);
             }
     }

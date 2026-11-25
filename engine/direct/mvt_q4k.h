@@ -18,7 +18,12 @@
 // chunks. A step's weights are decoded once (scales, nibbles to f32) and
 // used for all T tokens.
 //
-// Rows: wave W = 8 * workgroup + wave takes rows W + k * s8, k < K.
+// Rows: wave W = 8 * workgroup + wave takes rows W + (p K + k) s8, k < K,
+// in passes p = 0, 1, ... while the workgroup's first row is a row, so one
+// workgroup per CU walks the whole matrix (round 100: one pass of
+// rows / (8 K) workgroups left the last round of workgroups part empty).
+// Slot 0's weights load while x is staged: the last slot of a chunk loads
+// the next chunk's (or the next pass's) first weights. K is even.
 // Arguments: s[0:1] W, s[2:3] x (token t at + t * s7 bytes), s[4:5] y
 // (token t at + t * s9 bytes), s6 rows, s7 x stride, s8 waves in the
 // dispatch (workgroups * 8), s9 y stride; s10 workgroup id.
@@ -29,6 +34,7 @@
 namespace ts5::direct {
 
 inline std::string gen_mvt_q4k(int ncols, int T, int K = 8) {
+    if (K % 2 || K < 2) return "";
     const int nit = ncols / 2048;          // steps (chunks) per row
     const int row_bytes = ncols / 256 * 144;
     const int SUMS = T * 8192;             // LDS: x chunk of token t at 8192 t, its 128 sums at SUMS + 512 t
@@ -95,14 +101,49 @@ inline std::string gen_mvt_q4k(int ncols, int T, int K = 8) {
     o("v_lshlrev_b32 v12, 2, v13");
     o("v_lshl_add_u32 v12, v14, 9, v12");
     o("v_add_nc_u32 v12, " + S(SUMS) + ", v12");
-    for (int i = 0; i < K * T; i++) o("v_mov_b32 " + V(ACC + i) + ", 0");
     o("v_lshrrev_b32 v13, 5, v0");
     o("v_readfirstlane_b32 s16, v13");      // wave in the workgroup
     o("s_lshl_b32 s17, s10, 3");
     o("s_add_u32 s17, s17, s16");          // W
     o("s_mov_b32 s30, 0x76543210");
     o("s_mov_b32 s31, 0xfedcba98");
-    o("s_mov_b32 s18, 0");                 // chunk
+    auto loads = [&](int kk, int w, bool next = false) {
+        const int sa = 22 + 4 * (kk % 2);
+        if (next) {   // slot 0 of the next chunk, or after the last chunk of the next pass
+            o("s_add_u32 s13, s18, 1");
+            o("s_cmp_eq_u32 s13, " + S(nit));
+            o("s_cselect_b32 s13, 0, s13");
+            o("s_cselect_b32 s14, s15, 0");
+            o("s_add_u32 s11, s17, s20");
+            o("s_add_u32 s11, s11, s14");
+        } else {
+            o("s_mul_i32 s11, s8, " + S(kk));
+            o("s_add_u32 s11, s11, s17");
+            o("s_add_u32 s11, s11, s20");
+            o("s_mov_b32 s13, s18");
+        }
+        o("s_cmp_lt_u32 s11, s6");
+        o("s_cselect_b32 s11, s11, 0");
+        o("s_mul_i32 s" + S(sa) + ", s11, " + S(row_bytes));
+        o("s_mul_hi_u32 s" + S(sa + 1) + ", s11, " + S(row_bytes));
+        o("s_mul_i32 s12, s13, 1152");
+        o("s_add_u32 s" + S(sa) + ", s" + S(sa) + ", s12");
+        o("s_addc_u32 s" + S(sa + 1) + ", s" + S(sa + 1) + ", 0");
+        o("s_add_u32 s" + S(sa) + ", s" + S(sa) + ", s0");
+        o("s_addc_u32 s" + S(sa + 1) + ", s" + S(sa + 1) + ", s1");
+        const std::string sp = "s[" + S(sa) + ":" + S(sa + 1) + "]";
+        o("global_load_dword " + V(w) + ", v1, " + sp);
+        o("global_load_dwordx4 " + VR(w + 1, 4) + ", v2, " + sp);
+        o("global_load_dwordx4 " + VR(w + 5, 4) + ", v2, " + sp + " offset:576");
+        o("v_nop");
+    };
+    o("s_mul_i32 s15, s8, " + S(K));       // rows a pass of the dispatch takes
+    o("s_mov_b32 s20, 0");                 // the pass's row offset
+    o("s_mov_b32 s18, 0");
+    loads(0, WA);                          // pass 0's first weights, in flight while x is staged
+    label("pass");
+    for (int i = 0; i < K * T; i++) o("v_mov_b32 " + V(ACC + i) + ", 0");
+    o("s_mov_b32 s18, 0");
     label("chunk");
     // ---- stage chunk s18 of every token
     o("s_barrier");                        // every wave done with the last chunk
@@ -145,25 +186,6 @@ inline std::string gen_mvt_q4k(int ncols, int T, int K = 8) {
     o("s_barrier");
     // ---- step s18 of each row slot
     // weights of slot kk into set w: row s17 + kk s8 (past the end: row 0, unused)
-    auto loads = [&](int kk, int w) {
-        const int sa = 22 + 4 * (kk % 2);
-        o("s_mul_i32 s11, s8, " + S(kk));
-        o("s_add_u32 s11, s11, s17");
-        o("s_cmp_lt_u32 s11, s6");
-        o("s_cselect_b32 s11, s11, 0");
-        o("s_mul_i32 s" + S(sa) + ", s11, " + S(row_bytes));
-        o("s_mul_hi_u32 s" + S(sa + 1) + ", s11, " + S(row_bytes));
-        o("s_mul_i32 s12, s18, 1152");
-        o("s_add_u32 s" + S(sa) + ", s" + S(sa) + ", s12");
-        o("s_addc_u32 s" + S(sa + 1) + ", s" + S(sa + 1) + ", 0");
-        o("s_add_u32 s" + S(sa) + ", s" + S(sa) + ", s0");
-        o("s_addc_u32 s" + S(sa + 1) + ", s" + S(sa + 1) + ", s1");
-        const std::string sp = "s[" + S(sa) + ":" + S(sa + 1) + "]";
-        o("global_load_dword " + V(w) + ", v1, " + sp);
-        o("global_load_dwordx4 " + VR(w + 1, 4) + ", v2, " + sp);
-        o("global_load_dwordx4 " + VR(w + 5, 4) + ", v2, " + sp + " offset:576");
-        o("v_nop");
-    };
     // x reads of item i (block g = i / T, token t = i % T) into set i % 2
     auto xreads = [&](int i) {
         const int g = i / T, t = i % T, xr = XB + 34 * (i % 2);
@@ -172,13 +194,14 @@ inline std::string gen_mvt_q4k(int ncols, int T, int K = 8) {
         o("ds_read_b32 " + V(xr + 32) + ", v8 offset:" + S(512 * t + 256 * g));
         o("ds_read_b32 " + V(xr + 33) + ", v8 offset:" + S(512 * t + 256 * g + 8));
     };
-    loads(0, WA);
     for (int kk = 0; kk < K; kk++) {
         const int w = kk % 2 ? WB : WA;
         if (kk + 1 < K) loads(kk + 1, kk % 2 ? WA : WB);
-        o("s_waitcnt vmcnt(" + S(kk + 1 < K ? 3 : 0) + ")");
+        else loads(0, WA, true);           // (K even: the last slot's weights are in WB)
+        o("s_waitcnt vmcnt(3)");
         o("s_mul_i32 s11, s8, " + S(kk));
         o("s_add_u32 s11, s11, s17");
+        o("s_add_u32 s11, s11, s20");
         o("s_cmp_ge_u32 s11, s6");
         o("s_cbranch_scc1 skip" + S(kk));
         for (int g = 0; g < 2; g++)
@@ -267,8 +290,9 @@ inline std::string gen_mvt_q4k(int ncols, int T, int K = 8) {
     for (int kk = 0; kk < K; kk++) {
         o("s_mul_i32 s11, s8, " + S(kk));
         o("s_add_u32 s11, s11, s17");
+        o("s_add_u32 s11, s11, s20");
         o("s_cmp_ge_u32 s11, s6");
-        o("s_cbranch_scc1 end");
+        o("s_cbranch_scc1 stored");
         o("v_nop");
         o("v_nop");
         for (int t = 0; t < T; t++) {
@@ -296,7 +320,14 @@ inline std::string gen_mvt_q4k(int ncols, int T, int K = 8) {
         }
         o("s_mov_b32 exec_lo, s29");
     }
-    label("end");
+    label("stored");
+    // the next pass while the workgroup's first row is a row
+    o("s_add_u32 s20, s20, s15");
+    o("s_lshl_b32 s32, s10, 3");
+    o("s_add_u32 s32, s32, s20");
+    o("s_cmp_lt_u32 s32, s6");
+    o("s_cbranch_scc1 pass");
+    o("s_waitcnt vmcnt(0)");
     o("s_endpgm");
     return k;
 }

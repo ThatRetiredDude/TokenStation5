@@ -65,6 +65,14 @@ public:
         if (big_ok_ && left >= 128) return std::min(kBig, left / 128 * 128);
         return std::min(kBatch, left);
     }
+    // Speculative decoding's verify pass (round 100): tokens ids[0..n-1] at
+    // pos0.., 2 <= n <= kVerify, in one pass over the weights (mvt_q4k.h,
+    // mvt_q6k.h), every token's logits at verify_logits() + i * n_vocab, bit
+    // for bit what n one-token send()s would give. Returns at once.
+    static constexpr int kVerify = 4;
+    bool send_verify(const int32_t* ids, int n, int pos0);
+    bool verify_ok() const { return verify_ok_; }
+    const float* verify_logits() const { return (const float*)vlog_.cpu; }
     // Waits until every token sent so far is done.
     bool wait_all(int timeout_ms = 60000);
     uint64_t sent() const { return seq_; }
@@ -103,6 +111,9 @@ private:
     Prog* xtb_prog(int K);
     bool init_batch(std::string& err);
     bool init_big(std::string& err);
+    bool init_verify(std::string& err);
+    Prog* mvt_prog(const Weight& w, int T, int K);
+    void build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4::Stream& s);
 
     kfd::Device dev_;
     Model* m_ = nullptr;
@@ -118,6 +129,9 @@ private:
     bool batch_ok_ = false, big_ok_ = false;
     std::map<uint64_t, Prog> mts_;
     std::map<int, Prog> xtbs_;
+    std::map<uint64_t, Prog> mvts_;
+    bool verify_ok_ = false;
+    kfd::Buffer vx_, vxn_, vq_, vk_, vv_, vatt_, vt_, vg_, vu_, vh_, vlog_, vpart_;
     Prog k_qkb_, k_attnb_, k_redb_, k_sum_, k_attnt_, k_attnf_, k_redu_;
     kfd::Buffer pP_;   // the tiled kernels' SK partial sums
     size_t part_bytes_ = 0;

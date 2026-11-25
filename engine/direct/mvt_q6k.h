@@ -14,6 +14,7 @@
 namespace ts5::direct {
 
 inline std::string gen_mvt_q6k(int ncols, int T, int K = 8) {
+    if (K % 2 || K < 2) return "";
     const int nit = ncols / 2048;
     const int row_bytes = ncols / 256 * 210;
     const int SUMS = T * 8192;
@@ -92,7 +93,6 @@ inline std::string gen_mvt_q6k(int ncols, int T, int K = 8) {
     o("v_lshlrev_b32 v19, 2, v20");
     o("v_lshl_add_u32 v19, v22, 9, v19");
     o("v_add_nc_u32 v19, " + S(SUMS) + ", v19");
-    for (int i = 0; i < K * T; i++) o("v_mov_b32 " + V(ACC + i) + ", 0");
     o("v_lshrrev_b32 v20, 5, v0");
     o("v_readfirstlane_b32 s16, v20");
     o("s_lshl_b32 s17, s10, 3");
@@ -100,6 +100,46 @@ inline std::string gen_mvt_q6k(int ncols, int T, int K = 8) {
     o("s_mov_b32 s30, 0x76543210");
     o("s_mov_b32 s31, 0xfedcba98");
     o("s_mov_b32 s50, 0xc2000000");        // -32.0
+    auto loads = [&](int kk, int w, bool next = false) {
+        const int sa = 22 + 4 * (kk % 2);
+        if (next) {   // slot 0 of the next chunk, or after the last chunk of the next pass
+            o("s_add_u32 s13, s18, 1");
+            o("s_cmp_eq_u32 s13, " + S(nit));
+            o("s_cselect_b32 s13, 0, s13");
+            o("s_cselect_b32 s14, s15, 0");
+            o("s_add_u32 s11, s17, s20");
+            o("s_add_u32 s11, s11, s14");
+        } else {
+            o("s_mul_i32 s11, s8, " + S(kk));
+            o("s_add_u32 s11, s11, s17");
+            o("s_add_u32 s11, s11, s20");
+            o("s_mov_b32 s13, s18");
+        }
+        o("s_cmp_lt_u32 s11, s6");
+        o("s_cselect_b32 s11, s11, 0");
+        o("s_mul_i32 s" + S(sa) + ", s11, " + S(row_bytes));
+        o("s_mul_hi_u32 s" + S(sa + 1) + ", s11, " + S(row_bytes));
+        o("s_mul_i32 s12, s13, 1680");
+        o("s_add_u32 s" + S(sa) + ", s" + S(sa) + ", s12");
+        o("s_addc_u32 s" + S(sa + 1) + ", s" + S(sa + 1) + ", 0");
+        o("s_add_u32 s" + S(sa) + ", s" + S(sa) + ", s0");
+        o("s_addc_u32 s" + S(sa + 1) + ", s" + S(sa + 1) + ", s1");
+        const std::string sp = "s[" + S(sa) + ":" + S(sa + 1) + "]";
+        o("global_load_dwordx4 " + VR(w, 4) + ", v2, " + sp);
+        o("global_load_dword " + V(w + 4) + ", v2, " + sp + " offset:16");
+        o("global_load_dwordx4 " + VR(w + 5, 4) + ", v2, " + sp + " offset:32");
+        o("global_load_dword " + V(w + 9) + ", v2, " + sp + " offset:48");
+        o("global_load_dwordx4 " + VR(w + 10, 4) + ", v3, " + sp);
+        o("global_load_dword " + V(w + 14) + ", v3, " + sp + " offset:16");
+        o("global_load_dwordx3 " + VR(w + 15, 3) + ", v4, " + sp);
+        o("v_nop");
+    };
+    o("s_mul_i32 s15, s8, " + S(K));       // rows a pass of the dispatch takes
+    o("s_mov_b32 s20, 0");                 // the pass's row offset
+    o("s_mov_b32 s18, 0");
+    loads(0, WA);                          // pass 0's first weights, in flight while x is staged
+    label("pass");
+    for (int i = 0; i < K * T; i++) o("v_mov_b32 " + V(ACC + i) + ", 0");
     o("s_mov_b32 s18, 0");
     label("chunk");
     o("s_barrier");
@@ -136,29 +176,6 @@ inline std::string gen_mvt_q6k(int ncols, int T, int K = 8) {
     }
     o("s_waitcnt lgkmcnt(0)");
     o("s_barrier");
-    auto loads = [&](int kk, int w) {
-        const int sa = 22 + 4 * (kk % 2);
-        o("s_mul_i32 s11, s8, " + S(kk));
-        o("s_add_u32 s11, s11, s17");
-        o("s_cmp_lt_u32 s11, s6");
-        o("s_cselect_b32 s11, s11, 0");
-        o("s_mul_i32 s" + S(sa) + ", s11, " + S(row_bytes));
-        o("s_mul_hi_u32 s" + S(sa + 1) + ", s11, " + S(row_bytes));
-        o("s_mul_i32 s12, s18, 1680");
-        o("s_add_u32 s" + S(sa) + ", s" + S(sa) + ", s12");
-        o("s_addc_u32 s" + S(sa + 1) + ", s" + S(sa + 1) + ", 0");
-        o("s_add_u32 s" + S(sa) + ", s" + S(sa) + ", s0");
-        o("s_addc_u32 s" + S(sa + 1) + ", s" + S(sa + 1) + ", s1");
-        const std::string sp = "s[" + S(sa) + ":" + S(sa + 1) + "]";
-        o("global_load_dwordx4 " + VR(w, 4) + ", v2, " + sp);
-        o("global_load_dword " + V(w + 4) + ", v2, " + sp + " offset:16");
-        o("global_load_dwordx4 " + VR(w + 5, 4) + ", v2, " + sp + " offset:32");
-        o("global_load_dword " + V(w + 9) + ", v2, " + sp + " offset:48");
-        o("global_load_dwordx4 " + VR(w + 10, 4) + ", v3, " + sp);
-        o("global_load_dword " + V(w + 14) + ", v3, " + sp + " offset:16");
-        o("global_load_dwordx3 " + VR(w + 15, 3) + ", v4, " + sp);
-        o("v_nop");
-    };
     // x of item i (token i / 4, quarter i % 4) into set i % 2: 16 values, then the sum
     auto xreads = [&](int i) {
         const int t = i / 4, q = i % 4, xr = XQ + 17 * (i % 2);
@@ -166,13 +183,14 @@ inline std::string gen_mvt_q6k(int ncols, int T, int K = 8) {
             o("ds_read_b128 " + VR(xr + 4 * c, 4) + ", v" + S(7 + 4 * (q & 1) + c) + " offset:" + S(8192 * t + 256 * (q >> 1)));
         o("ds_read_b32 " + V(xr + 16) + ", v6 offset:" + S(512 * t + 8 * q));
     };
-    loads(0, WA);
     for (int kk = 0; kk < K; kk++) {
         const int w = kk % 2 ? WB : WA, A = w, B = w + 5, C = w + 10, SC = w + 15;
         if (kk + 1 < K) loads(kk + 1, kk % 2 ? WA : WB);
-        o("s_waitcnt vmcnt(" + S(kk + 1 < K ? 7 : 0) + ")");
+        else loads(0, WA, true);           // (K even: the last slot's weights are in WB)
+        o("s_waitcnt vmcnt(7)");
         o("s_mul_i32 s11, s8, " + S(kk));
         o("s_add_u32 s11, s11, s17");
+        o("s_add_u32 s11, s11, s20");
         o("s_cmp_ge_u32 s11, s6");
         o("s_cbranch_scc1 skip" + S(kk));
         xreads(0);
@@ -234,8 +252,9 @@ inline std::string gen_mvt_q6k(int ncols, int T, int K = 8) {
     for (int kk = 0; kk < K; kk++) {
         o("s_mul_i32 s11, s8, " + S(kk));
         o("s_add_u32 s11, s11, s17");
+        o("s_add_u32 s11, s11, s20");
         o("s_cmp_ge_u32 s11, s6");
-        o("s_cbranch_scc1 end");
+        o("s_cbranch_scc1 stored");
         o("v_nop");
         o("v_nop");
         for (int t = 0; t < T; t++) {
@@ -263,7 +282,14 @@ inline std::string gen_mvt_q6k(int ncols, int T, int K = 8) {
         }
         o("s_mov_b32 exec_lo, s29");
     }
-    label("end");
+    label("stored");
+    // the next pass while the workgroup's first row is a row
+    o("s_add_u32 s20, s20, s15");
+    o("s_lshl_b32 s32, s10, 3");
+    o("s_add_u32 s32, s32, s20");
+    o("s_cmp_lt_u32 s32, s6");
+    o("s_cbranch_scc1 pass");
+    o("s_waitcnt vmcnt(0)");
     o("s_endpgm");
     return k;
 }

@@ -1,10 +1,13 @@
 // ts5's SoKnee backend (--backend soknee, or the old name direct): the direct engine's runner
 // behind the Backend interface, for Qwen3 models of Q4_K and Q6_K weights on
 // the PS5's GPU. A prompt goes up to Runner::kBig tokens a pass over the weights
-// (send_batch, prompt_chunk); generation and short tails one token at a time.
+// (send_batch, prompt_chunk); generation and short tails one token at a time,
+// and speculative decoding's batches of 2 to Runner::kVerify tokens in one
+// verify pass (send_verify), every token's logits bit for bit one-at-a-time's.
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <string>
 
 #include "../src/backend.h"
 #include "runner.h"
@@ -25,6 +28,12 @@ public:
         if (pos0 < 0 || pos0 + n > r_.n_ctx()) {
             err = "position past the context";
             return false;
+        }
+        view_ = nullptr;
+        if (all_logits && logits && n >= 2 && n <= direct::Runner::kVerify && r_.verify_ok()) {
+            if (!r_.send_verify(tokens, n, pos0) || !r_.wait_all()) return fail(err);
+            std::memcpy(logits, r_.verify_logits(), (size_t)n * V_ * 4);
+            return true;
         }
         int i = 0;
         // Round 95: the bench and the server feed 256 tokens a call, so a
@@ -51,15 +60,25 @@ public:
         return true;
     }
     void expect_prompt(int end) override { expect_end_ = end; }
-    const float *logits_view() const override { return r_.logits(); }
+    // The last pass's logits: a verify pass's rows, or the one token's.
+    const float *logits_view() const override { return view_ ? view_ : r_.logits(); }
     bool forward_in_place(const int32_t *tokens, int n, int pos0, bool all_logits, std::string &err) override {
         if (all_logits && n > 1) {
-            err = "SoKnee keeps one token's logits";
-            return false;
+            if (!r_.verify_ok() || n > direct::Runner::kVerify) {
+                err = "SoKnee verifies at most " + std::to_string(r_.verify_ok() ? direct::Runner::kVerify : 1) + " tokens a pass";
+                return false;
+            }
+            if (pos0 < 0 || pos0 + n > r_.n_ctx()) {
+                err = "position past the context";
+                return false;
+            }
+            if (!r_.send_verify(tokens, n, pos0) || !r_.wait_all()) return fail(err);
+            view_ = r_.verify_logits();
+            return true;
         }
         return forward(tokens, n, pos0, nullptr, false, err);
     }
-    int in_place_rows() const override { return 1; }
+    int in_place_rows() const override { return r_.verify_ok() ? direct::Runner::kVerify : 1; }
     int n_ctx() const override { return r_.n_ctx(); }
     KvType kv_type() const override { return KvType::F16; }
 
@@ -70,6 +89,7 @@ private:
     }
     direct::Runner r_;
     int V_ = 0, expect_end_ = 0;
+    const float *view_ = nullptr;
 };
 
 }  // namespace

@@ -441,4 +441,85 @@ int cmd_pprof(int argc, char** argv) {
     return 0;
 }
 
+// ts5-direct verify-test MODEL [tokens=48] [prompt=512] [context=4096]:
+// speculative decoding's verify pass against one-token decoding (round 100).
+// A prompt, then `tokens` greedy tokens one at a time, every token's logits
+// kept; then for T = 2, 3, 4 the same prompt again and the same tokens in
+// verify passes of T: every logits row must be bit for bit the one-token
+// run's. GPU ms a token and a pass from the queue's timestamps.
+int cmd_verify_test(int argc, char** argv) {
+    if (argc < 3) return fail("usage: verify-test MODEL.gguf [tokens] [prompt] [context]");
+    const int n = argc > 3 ? std::atoi(argv[3]) : 48, P = argc > 4 ? std::atoi(argv[4]) : 512, ctx = argc > 5 ? std::atoi(argv[5]) : 4096;
+    if (n < 4 || P < 1 || P + n > ctx) return fail("tokens 4 or more, prompt + tokens at most the context");
+    Model m;
+    std::string err;
+    if (!m.open(argv[2], err)) return fail(err);
+    Runner R;
+    if (!R.init(m, ctx, err)) return fail(err);
+    if (!R.verify_ok()) return fail("no verify pass on this model");
+    const size_t V = (size_t)m.hp.n_vocab;
+    std::vector<int32_t> prompt(P);
+    for (int i = 0; i < P; i++) prompt[i] = 1000 + (i * 37) % 20000;
+    auto send_prompt = [&]() -> bool {
+        R.set_prompt_tokens(P);
+        for (int i = 0; i < P;) {
+            const int c = R.batch_ok() ? R.prompt_chunk(P - i) : 1;
+            if (!(c > 1 ? R.send_batch(prompt.data() + i, c, i, i + c >= P) : R.send(prompt[i], i))) return false;
+            i += c;
+        }
+        return R.wait_all(120000);
+    };
+    auto gpu_s = [&](uint64_t q) { return (R.t_end(q) - R.t_start(q)) / 100e6; };
+    auto median = [](std::vector<double> v) { std::sort(v.begin(), v.end()); return v.empty() ? 0.0 : v[v.size() / 2]; };
+    // the one-token run
+    if (!send_prompt()) return fail(R.err() + " (verify-test prompt)");
+    std::vector<int32_t> gen(n);
+    std::vector<float> ref((size_t)n * V);
+    std::vector<double> t1;
+    gen[0] = R.picked();
+    for (int i = 0; i < n; i++) {
+        if (!R.send(gen[i], P + i) || !R.wait_all()) return fail(R.err() + " (verify-test one token)");
+        t1.push_back(gpu_s(R.sent() - 1));
+        std::memcpy(ref.data() + (size_t)i * V, R.logits(), V * 4);
+        if (i + 1 < n) gen[i + 1] = R.picked();
+    }
+    std::printf("verify-test: prompt %d, %d tokens one at a time: %.3f ms a token (median GPU)\n", P, n, median(t1) * 1e3);
+    int bad = 0;
+    for (int T = 2; T <= Runner::kVerify; T++) {
+        if (!send_prompt()) return fail(R.err() + " (verify-test prompt)");
+        std::vector<double> tv;
+        int rows_bad = 0, first = -1;
+        float maxd = 0;
+        for (int i = 0; i < n;) {
+            const int c = std::min(T, n - i);
+            if (c >= 2) {
+                if (!R.send_verify(gen.data() + i, c, P + i) || !R.wait_all()) return fail(R.err() + " (verify-test verify)");
+                if (c == T) tv.push_back(gpu_s(R.sent() - 1));
+                for (int j = 0; j < c; j++) {
+                    const float* a = R.verify_logits() + (size_t)j * V;
+                    const float* b = ref.data() + (size_t)(i + j) * V;
+                    if (std::memcmp(a, b, V * 4)) {
+                        rows_bad++;
+                        if (first < 0) first = i + j;
+                        for (size_t k = 0; k < V; k++) maxd = std::max(maxd, std::fabs(a[k] - b[k]));
+                    }
+                }
+            } else {
+                if (!R.send(gen[i], P + i) || !R.wait_all()) return fail(R.err() + " (verify-test one token)");
+                if (std::memcmp(R.logits(), ref.data() + (size_t)i * V, V * 4)) rows_bad++;
+            }
+            i += c;
+        }
+        bad += rows_bad != 0;
+        const double tm = median(tv), to = median(t1);
+        std::printf("verify-test T %d: %.3f ms a pass = %.2fx one token (%.2f of %d one-token runs), %d of %d logits rows differ",
+                    T, tm * 1e3, tm / to, tm / to / T, T, rows_bad, n);
+        if (rows_bad) std::printf(" (first at token %d, largest difference %g)", first, maxd);
+        std::printf("\n");
+        std::fflush(stdout);
+    }
+    std::printf("verify-test: %s\n", bad ? "MISMATCH" : "all bit for bit the same");
+    return bad != 0;
+}
+
 }  // namespace ts5::direct
