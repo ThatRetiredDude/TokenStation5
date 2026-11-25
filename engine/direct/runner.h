@@ -66,8 +66,8 @@ public:
         return std::min(kBatch, left);
     }
     // Speculative decoding's verify pass (round 100): tokens ids[0..n-1] at
-    // pos0.., 2 <= n <= kVerify, in one pass over the weights (mvt_q4k.h,
-    // mvt_q6k.h), every token's logits at verify_logits() + i * n_vocab, bit
+    // pos0.., 2 <= n <= kVerify, in one pass over the weights (mvt2_q4k.h,
+    // mvt2_q6k.h), every token's logits at verify_logits() + i * n_vocab, bit
     // for bit what n one-token send()s would give. Returns at once.
     static constexpr int kVerify = 4;
     bool send_verify(const int32_t* ids, int n, int pos0);
@@ -112,7 +112,7 @@ private:
     bool init_batch(std::string& err);
     bool init_big(std::string& err);
     bool init_verify(std::string& err);
-    Prog* mvt_prog(const Weight& w, int T, int K);
+    Prog* mvt_prog(const Weight& w, int T);
     void build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4::Stream& s);
 
     kfd::Device dev_;

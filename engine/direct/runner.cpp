@@ -25,6 +25,8 @@
 #include "mv_q6k.h"
 #include "mvt_q4k.h"
 #include "mvt_q6k.h"
+#include "mvt2_q4k.h"
+#include "mvt2_q6k.h"
 #include "ops.h"
 #include "prefill.h"
 
@@ -895,20 +897,31 @@ void Runner::add_profile(std::vector<double>& acc) const {
 
 // ---- speculative decoding's verify pass (round 100)
 
-// mvt row slots a wave: TS5_DIRECT_MVT_K (4 or 8) for tests, else 8.
-static int mvt_k() {
-    static const int k = std::getenv("TS5_DIRECT_MVT_K") && std::atoi(std::getenv("TS5_DIRECT_MVT_K")) == 4 ? 4 : 8;
-    return k;
+// The verify pass's mat-vecs (round 101): mvt2_q4k / mvt2_q6k, x read once
+// a chunk and half-step, by default K 4 row slots with Q4_K's weights 2 items
+// ahead and Q6_K's 1. TS5_DIRECT_MVT=old: round 100's mvt_q4k / mvt_q6k (K 8,
+// x read once a slot). TS5_DIRECT_MVT_K / _PD: other row slots / depths, for
+// tests (a combination that doesn't fit in VGPRs falls back to the default).
+static int env_int(const char* name, int def) {
+    const char* e = std::getenv(name);
+    return e && *e ? std::atoi(e) : def;
 }
 
-Runner::Prog* Runner::mvt_prog(const Weight& w, int T, int K) {
-    const uint64_t key = (uint64_t)K << 56 | (uint64_t)T << 48 | (uint64_t)w.type() << 32 | (uint64_t)w.ne0();
+Runner::Prog* Runner::mvt_prog(const Weight& w, int T) {
+    static const bool old = std::getenv("TS5_DIRECT_MVT") && std::strcmp(std::getenv("TS5_DIRECT_MVT"), "old") == 0;
+    static const int kk = env_int("TS5_DIRECT_MVT_K", 4), pd = env_int("TS5_DIRECT_MVT_PD", 0);
+    const bool q6 = w.type() == GGML_Q6_K;
+    const uint64_t key = (uint64_t)T << 48 | (uint64_t)w.type() << 32 | (uint64_t)w.ne0();
     auto it = mvts_.find(key);
     if (it != mvts_.end()) return &it->second;
-    if (w.ne0() % 2048) return nullptr;
+    if (w.ne0() % 2048 || (w.type() != GGML_Q4_K && !q6)) return nullptr;
+    const int nc = (int)w.ne0();
     std::string src;
-    if (w.type() == GGML_Q4_K) src = gen_mvt_q4k((int)w.ne0(), T, K);
-    else if (w.type() == GGML_Q6_K) src = gen_mvt_q6k((int)w.ne0(), T, K);
+    if (old) src = q6 ? gen_mvt_q6k(nc, T, 8) : gen_mvt_q4k(nc, T, 8);
+    else {
+        src = q6 ? gen_mvt2_q6k(nc, T, kk, pd ? pd : 1) : gen_mvt2_q4k(nc, T, kk, pd ? pd : 2);
+        if (src.empty()) src = q6 ? gen_mvt2_q6k(nc, T, 4, 1) : gen_mvt2_q4k(nc, T, 4, 2);
+    }
     if (src.empty()) return nullptr;
     Prog& p = mvts_[key];
     std::string e;
@@ -928,9 +941,9 @@ bool Runner::init_verify(std::string& err) {
         for (int l = 0; l < hp.n_layer; l++) {
             const Layer& L = m_->layers[l];
             for (const Weight* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down})
-                if (!mvt_prog(*w, T, mvt_k())) { err = "a weight the multi-token mat-vecs don't take"; return false; }
+                if (!mvt_prog(*w, T)) { err = "a weight the multi-token mat-vecs don't take"; return false; }
         }
-        if (!mvt_prog(outw, T, mvt_k())) { err = "the output weight"; return false; }
+        if (!mvt_prog(outw, T)) { err = "the output weight"; return false; }
     }
     const size_t T = kVerify;
     for (auto pr : {std::make_pair(&vx_, T * E_ * 4), std::make_pair(&vxn_, T * E_ * 4), std::make_pair(&vq_, T * NQ_ * HD_ * 4),
@@ -961,8 +974,7 @@ void Runner::build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4
     const uint32_t t256[3] = {256, 1, 1}, t64[3] = {64, 1, 1}, t128[3] = {128, 1, 1};
     const size_t xE = (size_t)E_ * 4, xA = (size_t)NQ_ * HD_ * 4, xKV = (size_t)NKV_ * HD_ * 4, xF = (size_t)F_ * 4, pb = (size_t)64 * NKV_ * 2112;
     auto mvt = [&](const Weight& w, uint64_t x, size_t xs, uint64_t y, size_t ys) {
-        const int K = mvt_k();
-        Prog* p = mvt_prog(w, T, K);
+        Prog* p = mvt_prog(w, T);
         const uint32_t rows = (uint32_t)w.ne1();
         const uint32_t nw = wgs_ * 8;   // one workgroup a CU, passes over the rows (mvt_q4k.h)
         const uint64_t a = addr(w.data);

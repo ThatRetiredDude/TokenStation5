@@ -31,6 +31,8 @@
 #include "attn_f.h"
 #include "mvt_q4k.h"
 #include "mvt_q6k.h"
+#include "mvt2_q4k.h"
+#include "mvt2_q6k.h"
 #include "attn_d.h"
 #include "ops.h"
 #include "mm_q4k.h"
@@ -1054,6 +1056,14 @@ int main(int argc, char** argv) {
     if (cmd == "gen-mvt" && argc > 5) {   // gen-mvt q4|q6 COLUMNS T K: the multi-token mat-vecs (mvt_q4k.h, mvt_q6k.h)
         const int nc = std::atoi(argv[3]), T = std::atoi(argv[4]), K = std::atoi(argv[5]);
         std::fputs((std::string(argv[2]) == "q6" ? ts5::direct::gen_mvt_q6k(nc, T, K) : ts5::direct::gen_mvt_q4k(nc, T, K)).c_str(), stdout);
+        return 0;
+    }
+    if (cmd == "gen-mvt2" && argc > 5) {   // gen-mvt2 q4|q6 COLUMNS T K [PD]: x read once a chunk (mvt2_q4k.h, mvt2_q6k.h)
+        const int nc = std::atoi(argv[3]), T = std::atoi(argv[4]), K = std::atoi(argv[5]), pd = argc > 6 ? std::atoi(argv[6]) : 0;
+        const bool q6 = std::string(argv[2]) == "q6";
+        const std::string src = q6 ? ts5::direct::gen_mvt2_q6k(nc, T, K, pd ? pd : 1) : ts5::direct::gen_mvt2_q4k(nc, T, K, pd ? pd : 2);
+        if (src.empty()) { std::fprintf(stderr, "gen-mvt2: no kernel for that (VGPRs or arguments)\n"); return 1; }
+        std::fputs(src.c_str(), stdout);
         return 0;
     }
     if (cmd == "gen-xt") {   // prints to_xT (prefill.h) for K columns and T tokens

@@ -19,6 +19,8 @@
 #include "mv_q6k.h"
 #include "mvt_q4k.h"
 #include "mvt_q6k.h"
+#include "mvt2_q4k.h"
+#include "mvt2_q6k.h"
 #include "mm_q4k.h"
 #include "mm_q4k_sb.h"
 #include "mm_q4k_h.h"
@@ -678,7 +680,10 @@ int cmd_mvt_test(int argc, char** argv) {
         return true;
     };
     int bad = 0;
-    bool warm = false;
+    // round 100's mvt (K 8) beside round 101's mvt2 variants (K row slots, PD items ahead)
+    struct Cfg { bool v2; int K, PD; };
+    const Cfg q4cfg[] = {{false, 8, 0}, {true, 4, 2}, {true, 8, 2}, {true, 4, 3}};
+    const Cfg q6cfg[] = {{false, 8, 0}, {true, 2, 1}, {true, 4, 1}, {true, 8, 1}};
     for (const Shape& sh : shapes) {
         const int bb = sh.q6 ? 210 : 144;
         const size_t wb = (size_t)sh.rows * sh.cols / 256 * bb;
@@ -705,17 +710,27 @@ int cmd_mvt_test(int argc, char** argv) {
                                            (uint32_t)sh.rows, 0, wgs * 8, 0};
                 one(s, km, 0, args, wgs);
             }
-            if (!warm)   // ~150 ms of work first, so the clock is up
-                for (int i = 0; i < 2000; i++) one(s, km, 0, am, wgs);
-            warm = true;
+            // ~150 ms of work first at every shape, so the clock is up (round
+            // 100: once at the start wasn't enough; filling the next shape's
+            // weights on the CPU let it drop)
+            const int nwarm = std::min(4000, std::max(200, (int)(150e3 / (wb / 350e3))));
+            for (int i = 0; i < nwarm; i++) one(s, km, 0, am, wgs);
             if (!submit(s)) return 1;
         }
         double base = 0;
         for (int T : Ts)
-            for (int K : {4, 8}) {
-                const std::string src = sh.q6 ? gen_mvt_q6k(sh.cols, T, K) : gen_mvt_q4k(sh.cols, T, K);
+            for (const Cfg& cf : sh.q6 ? q6cfg : q4cfg) {
+                const int K = cf.K;
+                const std::string src = !cf.v2 ? (sh.q6 ? gen_mvt_q6k(sh.cols, T, K) : gen_mvt_q4k(sh.cols, T, K))
+                                               : (sh.q6 ? gen_mvt2_q6k(sh.cols, T, K, cf.PD) : gen_mvt2_q4k(sh.cols, T, K, cf.PD));
+                char cname[32];
+                std::snprintf(cname, sizeof cname, cf.v2 ? "mvt2 K %d PD %d" : "mvt  K %d", K, cf.PD);
+                if (src.empty()) {
+                    std::printf("mvt-test %-24s T %d %s: no kernel (too many VGPRs)\n", sh.name, T, cname);
+                    continue;
+                }
                 gfx10::Kernel kt;
-                if (src.empty() || !gfx10::assemble(src, kt, &err)) { std::fprintf(stderr, "mvt-test: T %d K %d: %s\n", T, K, err.c_str()); return 1; }
+                if (!gfx10::assemble(src, kt, &err)) { std::fprintf(stderr, "mvt-test: T %d %s: %s\n", T, cname, err.c_str()); return 1; }
                 std::memcpy((char*)code.cpu + kCodeT, kt.code.data(), kt.code.size() * 4);
                 const uint32_t nw = wgs * 8;
                 const uint32_t at[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)x.gpu, (uint32_t)(x.gpu >> 32), (uint32_t)y2.gpu, (uint32_t)(y2.gpu >> 32),
@@ -740,8 +755,8 @@ int cmd_mvt_test(int argc, char** argv) {
                     base = t1;
                     std::printf("mvt-test %-24s one token: %7.1f us (%.0f GB/s)\n", sh.name, t1 * 1e6, wb / t1 / 1e9);
                 }
-                std::printf("mvt-test %-24s T %d K %d: %7.1f us = %.2fx one token (%.1f us beside it, %.2f of %d one-token runs) (%d tokens' outputs differ%s), %d VGPRs, %zu bytes\n",
-                            sh.name, T, K, tm * 1e6, tm / t1, t1 * 1e6, tm / t1 / T, T, (int)diff,
+                std::printf("mvt-test %-24s T %d %s: %7.1f us = %.2fx one token (%.1f us beside it, %.2f of %d one-token runs) (%d tokens' outputs differ%s), %d VGPRs, %zu bytes\n",
+                            sh.name, T, cname, tm * 1e6, tm / t1, t1 * 1e6, tm / t1 / T, T, (int)diff,
                             first >= 0 ? (", first at " + std::to_string(first) + ": " + std::to_string(((const float*)y1.cpu)[first]) + " vs " +
                                           std::to_string(((const float*)y2.cpu)[first])).c_str() : "",
                             kt.vgprs, kt.code.size() * 4);
