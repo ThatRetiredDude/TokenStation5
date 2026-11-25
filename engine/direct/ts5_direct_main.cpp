@@ -922,7 +922,7 @@ int main(int argc, char** argv) {
         const int K = argc > 2 ? std::atoi(argv[2]) : 4096, T = argc > 3 ? std::atoi(argv[3]) : 16;
         const bool q6 = argc > 4 && std::string(argv[4]) == "q6";
         const int ex = argc > 5 ? std::atoi(argv[5]) : 0;   // gen-mm K T q4 EXP [SK]: mm_q4k's timing experiment (SK: mm_q4k_h's wave groups)
-        std::fputs((q6 ? (ex == 12 || ex == 22 ? ts5::direct::gen_mm_q6k_h(K, T, argc > 6 ? std::atoi(argv[6]) : 1, ex == 12) : ex == 10 ? ts5::direct::gen_mm_q6k_sb(K, T) : ts5::direct::gen_mm_q6k(K, T)) : ex == 20 ? ts5::direct::gen_mm_q4k_w(K, T, argc > 6 ? std::atoi(argv[6]) : 1) : ex >= 12 ? ts5::direct::gen_mm_q4k_h(K, T, ex >= 16 ? 0 : ex - 12, argc > 6 ? std::atoi(argv[6]) : 1, ex == 17 ? 2 : 1, ex == 21 ? 64 : 32, ex != 22) : ex >= 10 ? ts5::direct::gen_mm_q4k_sb(K, T, ex - 9) : ts5::direct::gen_mm_q4k(K, T, 4, ex)).c_str(), stdout);
+        std::fputs((q6 ? (ex == 12 || ex == 22 ? ts5::direct::gen_mm_q6k_h(K, T, argc > 6 ? std::atoi(argv[6]) : 1, ex == 12) : ex == 10 ? ts5::direct::gen_mm_q6k_sb(K, T) : ts5::direct::gen_mm_q6k(K, T)) : ex == 20 ? ts5::direct::gen_mm_q4k_w(K, T, argc > 6 ? std::atoi(argv[6]) : 1) : ex >= 12 ? ts5::direct::gen_mm_q4k_h(K, T, ex >= 16 ? 0 : ex - 12, argc > 6 ? std::atoi(argv[6]) : 1, ex == 17 ? 2 : 1, ex == 21 ? 64 : 32, ex != 22, ex == 25) : ex >= 10 ? ts5::direct::gen_mm_q4k_sb(K, T, ex - 9) : ts5::direct::gen_mm_q4k(K, T, 4, ex)).c_str(), stdout);
         return 0;
     }
     if (cmd == "gen-mv6") {   // prints mv_q6k for a column count [diag]

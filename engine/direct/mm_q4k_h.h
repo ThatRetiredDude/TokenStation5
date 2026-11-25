@@ -49,8 +49,17 @@ namespace ts5::direct {
 // avoids). Each pk_fma reads its sum and the weight pair: the f16 sums go in
 // registers of banks 0-2 only and the weight pairs W0 / W1 in bank 3 (round
 // 63: the bare multiply-adds ran at only ~66% of the f16 peak).
-inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 1, int LN = 32, bool BK = true) {
+//
+// IL (RW 1, LN 32): the weights interleaved for the GPU (round 72: the weight
+// stream, not the arithmetic, holds gate/up at ~127 us against 83 for the
+// multiply-adds alone; each lane reading its own row makes every 16-byte load
+// of a wave touch 32 rows' cache lines). For each 32 rows and block b, 4608
+// bytes at (group NB + b) 4608: the 32 rows' 16-byte headers (lane i at 16 i),
+// then for quarter w, at 512 + 1024 w, the first 16 quant bytes of each row
+// (lane i at 16 i) and at + 512 the second 16. Every load is 512 contiguous bytes.
+inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 1, int LN = 32, bool BK = true, bool IL = false) {
     if (LN == 64 && RW != 1) return "";
+    if (IL && (RW != 1 || LN != 32)) return "";
     const int LB = LN == 64 ? 6 : 5, L4 = 4 * LN;   // log2 lanes; bytes a row of lanes
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
@@ -76,12 +85,23 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
     o("v_and_b32 v0, " + S(LN - 1) + ", v0");
     o("s_lshl_b32 s11, s10, " + S(RW == 2 ? 6 : LB));
     o("v_add_nc_u32 v3, s11, v0");                       // the row (and row + 32)
+    if (IL) {
+        o("v_lshlrev_b32 v1, 4, v0");                    // lane 16
+        o("s_mul_i32 s11, s10, " + S(NB * 4608));         // the group's blocks
+        o("v_add_nc_u32 v1, s11, v1");
+        o("s_mul_i32 s11, s17, 4608");
+        o("v_add_nc_u32 v1, s11, v1");                   // block g
+        o("s_mul_i32 s11, s19, 1024");
+        o("s_add_u32 s11, s11, 512");
+        o("v_add_nc_u32 v2, s11, v1");                   // its quants: 512 + 1024 w
+    } else {
     o("v_mul_u32_u24 v1, " + S(RB) + ", v3");
     o("s_mul_i32 s11, s17, 144");
     o("v_add_nc_u32 v1, s11, v1");                       // block g
     o("s_lshl_b32 s11, s19, 5");
     o("s_add_u32 s11, s11, 16");
     o("v_add_nc_u32 v2, s11, v1");                       // its quants: 16 + 32 w
+    }
     if (RW == 2) {                                       // row + 32's: v6, v7
         o("v_add_nc_u32 v6, " + S(32 * RB) + ", v1");
         o("v_add_nc_u32 v7, " + S(32 * RB) + ", v2");
@@ -96,7 +116,7 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
             const int b = base + 12 * r;
             o("global_load_dwordx4 v[" + S(b) + ":" + S(b + 3) + "], " + h + ", s[0:1]");
             o("global_load_dwordx4 v[" + S(b + 4) + ":" + S(b + 7) + "], " + q + ", s[0:1]");
-            o("global_load_dwordx4 v[" + S(b + 8) + ":" + S(b + 11) + "], " + q + ", s[0:1] offset:16");
+            o("global_load_dwordx4 v[" + S(b + 8) + ":" + S(b + 11) + "], " + q + ", s[0:1] offset:" + S(IL ? 512 : 16));
         }
     };
     load(A);
@@ -120,7 +140,7 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
     sload(SX, XC ? P : 4 * P, "s[12:13]", 0);
     k += "block:\n";
     for (const char* v : {"v1", "v2", "v6", "v7"})
-        if (RW == 2 || v[1] < '3') o(std::string("v_add_nc_u32 ") + v + ", " + S(144 * SK) + ", " + v);
+        if (RW == 2 || v[1] < '3') o(std::string("v_add_nc_u32 ") + v + ", " + S((IL ? 4608 : 144) * SK) + ", " + v);
     // the next block's quants, unless this is the last (past the matrix's end)
     o("s_cmp_eq_u32 s16, 1");
     o("s_cbranch_scc1 noload");
