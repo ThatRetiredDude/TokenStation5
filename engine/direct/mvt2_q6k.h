@@ -5,16 +5,20 @@
 // loads them again (the second time from the caches, not memory). A lane
 // sum still gets quarters 0, 1, 2, 3 of a step in order, so the numbers are
 // mv_q6k's. Weights load PD items ahead (PD 1: one step's bytes, as mv_q6k).
+// ilp (default): up to 4 of a half's token / quarter dot products side by
+// side instead of one after another (the same sums in the same order).
 //
 // Arguments, rows and passes as mvt_q4k. W must be readable 2 bytes past its
 // end (as mv_q6k).
 #pragma once
 #include <algorithm>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace ts5::direct {
 
-inline std::string gen_mvt2_q6k(int ncols, int T, int K = 4, int PD = 1) {
+inline std::string gen_mvt2_q6k(int ncols, int T, int K = 4, int PD = 1, bool ilp = true) {
     const int NS = PD + 1 <= 2 ? 2 : 4, J = 2 * K;   // weight sets; items a chunk: (half h, slot kk), h major
     if (T < 1 || T > 4 || K < 1 || PD < 1 || PD > 3 || PD > K || J % NS) return "";
     const int nit = ncols / 2048;
@@ -234,16 +238,28 @@ inline std::string gen_mvt2_q6k(int ncols, int T, int K = 4, int PD = 1) {
                 }
             }
             if (kk == 0) o("s_waitcnt lgkmcnt(0)");   // the half's x
+            // (token, quarter) dot products, up to 4 at once in ds(11 - c)
+            // (ilp; round 108: one chain at a time left each FMA waiting on
+            // the last), each still summed in mv_q6k's order and added to its
+            // lane sum in the same order as before (per token quarter 2h,
+            // then 2h + 1)
+            std::vector<std::pair<int, int>> tq;
             for (int t = 0; t < T; t++)
-                for (int q = 2 * h; q < 2 * h + 2; q++) {
-                    const int xr = XQ + 34 * t + 17 * (q - 2 * h), vf = VF + 16 * (q - 2 * h);
-                    for (int jj = 0; jj < 16; jj++) {
-                        if (jj == 0) o("v_mul_f32 " + ds(11) + ", " + V(vf) + ", " + V(xr));
-                        else o("v_fmac_f32 " + ds(11) + ", " + V(vf + jj) + ", " + V(xr + jj));
+                for (int q = 2 * h; q < 2 * h + 2; q++) tq.push_back({t, q});
+            const size_t G = ilp ? 4 : 1;
+            for (size_t b0 = 0; b0 < tq.size(); b0 += G) {
+                const size_t b1 = std::min(tq.size(), b0 + G);
+                auto xr = [&](size_t c) { return XQ + 34 * tq[c].first + 17 * (tq[c].second - 2 * h); };
+                auto vf = [&](size_t c) { return VF + 16 * (tq[c].second - 2 * h); };
+                auto acc = [&](size_t c) { return ds(11 - (int)(c - b0)); };
+                for (int jj = 0; jj < 16; jj++)
+                    for (size_t c = b0; c < b1; c++) {
+                        if (jj == 0) o("v_mul_f32 " + acc(c) + ", " + V(vf(c)) + ", " + V(xr(c)));
+                        else o("v_fmac_f32 " + acc(c) + ", " + V(vf(c) + jj) + ", " + V(xr(c) + jj));
                     }
-                    o("v_fma_f32 " + ds(11) + ", " + V(xr + 16) + ", s50, " + ds(11));
-                    o("v_fmac_f32 " + V(ACC + T * kk + t) + ", " + ds(q) + ", " + ds(11));
-                }
+                for (size_t c = b0; c < b1; c++) o("v_fma_f32 " + acc(c) + ", " + V(xr(c) + 16) + ", s50, " + acc(c));
+                for (size_t c = b0; c < b1; c++) o("v_fmac_f32 " + V(ACC + T * kk + tq[c].first) + ", " + ds(tq[c].second) + ", " + acc(c));
+            }
             label("skip" + S(j));
             if (kk == 0) o("s_waitcnt lgkmcnt(0)");
         }

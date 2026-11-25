@@ -74,6 +74,9 @@ public:
     // mvt2_q6k.h), every token's logits at verify_logits() + i * n_vocab, bit
     // for bit what n one-token send()s would give. Returns at once.
     static constexpr int kVerify = 4;
+    // The die's temperature (k10temp Tctl, C), or -1 when it can't be read
+    // (TS5_DIRECT_PACE=0 too): what the runner's pacing reads (round 108).
+    static double die_temp();
     bool send_verify(const int32_t* ids, int n, int pos0);
     bool verify_ok() const { return verify_ok_; }
     const float* verify_logits() const { return (const float*)vlog_.cpu; }

@@ -7,9 +7,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../src/backend.h"
@@ -447,6 +449,11 @@ int cmd_pprof(int argc, char** argv) {
 // kept; then for T = 2, 3, 4 the same prompt again and the same tokens in
 // verify passes of T: every logits row must be bit for bit the one-token
 // run's. GPU ms a token and a pass from the queue's timestamps.
+// Paced (round 108: unpaced at prompt 4000 it took the die past 91 C in
+// ~20 s): each phase starts at Tctl < TS5_VT_START (default 60 C), and
+// between passes at TS5_VT_HOT (default 82) or more it waits for
+// TS5_VT_COOL (default 70) or less. The pauses are between passes, so the
+// GPU times of the passes don't include them; "paused" says how long.
 int cmd_verify_test(int argc, char** argv) {
     if (argc < 3) return fail("usage: verify-test MODEL.gguf [tokens] [prompt] [context] [profile]");
     const int n = argc > 3 ? std::atoi(argv[3]) : 48, P = argc > 4 ? std::atoi(argv[4]) : 512, ctx = argc > 5 ? std::atoi(argv[5]) : 4096;
@@ -460,7 +467,26 @@ int cmd_verify_test(int argc, char** argv) {
     const size_t V = (size_t)m.hp.n_vocab;
     std::vector<int32_t> prompt(P);
     for (int i = 0; i < P; i++) prompt[i] = 1000 + (i * 37) % 20000;
+    auto envd = [](const char* n, double d) { const char* e = std::getenv(n); return e ? std::atof(e) : d; };
+    const double vt_start = envd("TS5_VT_START", 60), vt_hot = envd("TS5_VT_HOT", 82), vt_cool = envd("TS5_VT_COOL", 70);
+    double paused = 0, peak = 0;
+    auto wait_below = [&](double below) {   // at most 60 s
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < 3000; i++) {
+            const double c = Runner::die_temp();
+            peak = std::max(peak, c);
+            if (c < below) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        paused += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    };
+    auto pace_pass = [&]() {   // between passes
+        const double c = Runner::die_temp();
+        peak = std::max(peak, c);
+        if (c >= vt_hot) wait_below(vt_cool + 0.01);
+    };
     auto send_prompt = [&]() -> bool {
+        wait_below(vt_start);
         R.set_prompt_tokens(P);
         for (int i = 0; i < P;) {
             const int c = R.batch_ok() ? R.prompt_chunk(P - i) : 1;
@@ -481,6 +507,7 @@ int cmd_verify_test(int argc, char** argv) {
         if (!R.send(gen[i], P + i) || !R.wait_all()) return fail(R.err() + " (verify-test one token)");
         t1.push_back(gpu_s(R.sent() - 1));
         std::memcpy(ref.data() + (size_t)i * V, R.logits(), V * 4);
+        pace_pass();
         if (i + 1 < n) gen[i + 1] = R.picked();
     }
     std::printf("verify-test: prompt %d, %d tokens one at a time: %.3f ms a token (median GPU)\n", P, n, median(t1) * 1e3);
@@ -508,6 +535,7 @@ int cmd_verify_test(int argc, char** argv) {
                 if (!R.send(gen[i], P + i) || !R.wait_all()) return fail(R.err() + " (verify-test one token)");
                 if (std::memcmp(R.logits(), ref.data() + (size_t)i * V, V * 4)) rows_bad++;
             }
+            pace_pass();
             i += c;
         }
         bad += rows_bad != 0;
@@ -518,7 +546,7 @@ int cmd_verify_test(int argc, char** argv) {
         std::printf("\n");
         std::fflush(stdout);
     }
-    std::printf("verify-test: %s\n", bad ? "MISMATCH" : "all bit for bit the same");
+    std::printf("verify-test: %s (paced: %.1f s paused, Tctl peak read %.1f C)\n", bad ? "MISMATCH" : "all bit for bit the same", paused, peak);
     // profile (round 102): where a verify pass of T tokens spends its time,
     // step by step, beside one token's (16 passes each, a wait after each)
     if (argc > 6 && std::strcmp(argv[6], "profile") == 0) {
@@ -531,6 +559,7 @@ int cmd_verify_test(int argc, char** argv) {
                 const bool ok = T == 1 ? R.send(gen[i], P + i) : R.send_verify(gen.data() + i, T, P + i);
                 if (!ok || !R.wait_all()) return fail(R.err() + " (verify-test profile)");
                 R.add_profile(acc[T]);
+                pace_pass();
             }
             for (double& v : acc[T]) v /= std::max(1, done);
         }
