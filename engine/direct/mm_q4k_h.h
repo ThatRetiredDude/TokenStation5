@@ -24,20 +24,31 @@ namespace ts5::direct {
 
 // exp (timing only, wrong values): 1 no x loads in the loop, 2 no unpacking
 // (the quant dword used as the f16 pair), 3 neither.
-inline std::string gen_mm_q4k_h(int K, int T, int exp = 0) {
+//
+// SK (1, 2, 4, 8): SK groups of 4 waves a workgroup (128 SK threads), group
+// g taking blocks g, g + SK, ...; the 4 SK partial sums added through LDS.
+// Round 56: a launch runs at full speed only with ~2 or more workgroups' worth
+// of waves for every slot (one round is ~280 workgroups of 4 waves; 128
+// workgroups ran 45% slower a row, a second round of 8 workgroups +17%).
+inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
     const int NB = K / 256, RB = NB * 144, P = T / 2;   // dwords of x a column
+    if (NB % SK) return "";
     const int A = 8, B = 20, SC = 32, MN = 34, ACC = 36, TMP = ACC + T, U = TMP + P;
     const int SX = 20, SXS = 84;                         // x: two sets of 4 columns (4 P); the sub-block sums: T (f32)
-    k += ".kernel mm_q4k_h\n.wave32\n.user_sgprs 10\n.tgid_x\n.lds " + S(4 * T * 128) + "\n";
+    k += ".kernel mm_q4k_h\n.wave32\n.user_sgprs 10\n.tgid_x\n.lds " + S(4 * SK * T * 128) + "\n";
     o("v_lshrrev_b32 v2, 5, v0");
-    o("v_readfirstlane_b32 s19, v2");                    // w
+    o("v_readfirstlane_b32 s18, v2");                    // the wave: 4 g + w
+    o("s_and_b32 s19, s18, 3");                          // w: its quarter of a block
+    o("s_lshr_b32 s17, s18, 2");                         // g: blocks g, g + SK, ..
     o("v_and_b32 v0, 31, v0");
     o("s_lshl_b32 s11, s10, 5");
     o("v_add_nc_u32 v3, s11, v0");                       // the row
     o("v_mul_u32_u24 v1, " + S(RB) + ", v3");
+    o("s_mul_i32 s11, s17, 144");
+    o("v_add_nc_u32 v1, s11, v1");                       // block g
     o("s_lshl_b32 s11, s19, 5");
     o("s_add_u32 s11, s11, 16");
     o("v_add_nc_u32 v2, s11, v1");                       // its quants: 16 + 32 w
@@ -50,12 +61,16 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0) {
     };
     load(A);
     o("s_mul_i32 s11, s19, " + S(64 * P * 4));
+    o("s_mul_i32 s16, s17, " + S(256 * P * 4));
+    o("s_add_u32 s11, s11, s16");
     o("s_add_u32 s12, s2, s11");
     o("s_addc_u32 s13, s3, 0");
     o("s_mul_i32 s11, s19, " + S(2 * T * 4));
+    o("s_mul_i32 s16, s17, " + S(8 * T * 4));
+    o("s_add_u32 s11, s11, s16");
     o("s_add_u32 s14, s8, s11");
     o("s_addc_u32 s15, s9, 0");
-    o("s_mov_b32 s16, " + S(NB));
+    o("s_mov_b32 s16, " + S(NB / SK));
     auto sload = [&](int dst, int n, const std::string& base, int off) {
         for (int i = 0; i < n; i += (n - i >= 16 ? 16 : 8)) {
             const int w = n - i >= 16 ? 16 : 8;
@@ -64,9 +79,13 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0) {
     };
     sload(SX, 4 * P, "s[12:13]", 0);
     k += "block:\n";
-    o("v_add_nc_u32 v1, 144, v1");
-    o("v_add_nc_u32 v2, 144, v2");
+    o("v_add_nc_u32 v1, " + S(144 * SK) + ", v1");
+    o("v_add_nc_u32 v2, " + S(144 * SK) + ", v2");
+    // the next block's quants, unless this is the last (past the matrix's end)
+    o("s_cmp_eq_u32 s16, 1");
+    o("s_cbranch_scc1 noload");
     load(B);
+    k += "noload:\n";
     o("s_waitcnt vmcnt(3)");
     auto bit = [](int byte) { return 8 * (byte % 4); };
     auto H = [&](int byte) { return "v" + S(A + 1 + byte / 4); };
@@ -112,7 +131,12 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0) {
         o("s_waitcnt lgkmcnt(0)");
         if (exp & 1) {}
         else if (st + 1 < 16) sload(buf(st + 1), 4 * P, "s[12:13]", xoff(st + 1));
-        else sload(buf(0), 4 * P, "s[12:13]", 256 * P * 4);   // the next block's first step
+        else {   // the next block's first step, unless this is the last
+            o("s_cmp_eq_u32 s16, 1");
+            o("s_cbranch_scc1 nox");
+            sload(buf(0), 4 * P, "s[12:13]", 256 * SK * P * 4);
+            k += "nox:\n";
+        }
         if (dw == 6) sload(SXS, T, "s[14:15]", jj * T * 4);   // the sub-block's sums, for its end
         const std::string q = "v" + S(A + 4 + dw), u = "v" + S(U);
         if (exp & 2) {}
@@ -155,9 +179,9 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0) {
                 }
         }
     }
-    o("s_add_u32 s12, s12, " + S(256 * P * 4));
+    o("s_add_u32 s12, s12, " + S(256 * SK * P * 4));
     o("s_addc_u32 s13, s13, 0");
-    o("s_add_u32 s14, s14, " + S(8 * T * 4));
+    o("s_add_u32 s14, s14, " + S(8 * SK * T * 4));
     o("s_addc_u32 s15, s15, 0");
     o("s_waitcnt vmcnt(0)");
     for (int i = 0; i < 12; i++) o("v_mov_b32 v" + S(A + i) + ", v" + S(B + i));
@@ -165,16 +189,16 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0) {
     o("s_cmp_lg_u32 s16, 0");
     o("s_cbranch_scc1 block");
     o("v_lshlrev_b32 v5, 2, v0");
-    o("s_mul_i32 s11, s19, " + S(T * 128));
+    o("s_mul_i32 s11, s18, " + S(T * 128));
     o("v_add_nc_u32 v5, s11, v5");
     for (int t = 0; t < T; t++) o("ds_write_b32 v5, v" + S(ACC + t) + " offset:" + S(t * 128));
     o("s_waitcnt lgkmcnt(0)");
     o("s_barrier");
-    o("s_cmp_lg_u32 s19, 0");
+    o("s_cmp_lg_u32 s18, 0");
     o("s_cbranch_scc1 done");
     o("v_lshlrev_b32 v5, 2, v0");
     // (TMP and U, contiguous, hold the T partials read back)
-    for (int w = 1; w < 4; w++) {
+    for (int w = 1; w < 4 * SK; w++) {
         for (int t = 0; t < T; t++) o("ds_read_b32 v" + S(TMP + t) + ", v5 offset:" + S((w * T + t) * 128));
         o("s_waitcnt lgkmcnt(0)");
         for (int t = 0; t < T; t++) o("v_add_f32 v" + S(ACC + t) + ", v" + S(ACC + t) + ", v" + S(TMP + t));
