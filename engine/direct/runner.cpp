@@ -62,14 +62,15 @@ Runner::Prog* Runner::mv_prog(const Weight& w, Stage st) {
 
 // The prompt kernels: Q4_K with 4 waves a workgroup, Q6_K with 2 (round 41:
 // the best for most shapes; Q6_K's 158 VGPRs leave room for fewer waves).
-// mm_q4k_h's groups of 4 waves a workgroup (round 56: a launch needs about
-// 512 workgroups' worth of 4 waves to run at full speed): 12288 rows 2,
-// 4096 rows 4, 1024 rows 8.
-static int q4_sk(const Weight& w) {
-    static const int max_sk = std::getenv("TS5_DIRECT_MAX_SK") ? std::atoi(std::getenv("TS5_DIRECT_MAX_SK")) : 8;   // for tests
-    const int wg = (int)(w.ne1() / 32), NB = (int)(w.ne0() / 256);
+// The f16 prompt kernels' groups of 4 waves a workgroup (SK): enough for
+// about 512 workgroups' worth, at most 4, and 2 for K 12288 (round 58, us a
+// pass SK 1/2/4/8: attn_q 65/64/52/65, attn_k 41/19/15/19, gate/up
+// 150/137/135/187, down 187/146/156/208).
+static int mm_sk(const Weight& w) {
+    static const int max_sk = std::getenv("TS5_DIRECT_MAX_SK") ? std::atoi(std::getenv("TS5_DIRECT_MAX_SK")) : 4;   // for tests
+    const int wg = (int)(w.ne1() / 32), NB = (int)(w.ne0() / 256), cap = std::min(max_sk, NB > 16 ? 2 : 4);
     int sk = 1;
-    while (sk < max_sk && wg * sk < 512 && NB % (2 * sk) == 0) sk *= 2;
+    while (sk < cap && wg * sk < 512 && NB % (2 * sk) == 0) sk *= 2;
     return sk;
 }
 
@@ -85,9 +86,9 @@ Runner::Prog* Runner::mm_prog(const Weight& w) {
     // Default: packed f16 multiply-adds (mm_q4k_h.h, mm_q6k_h.h; round 52:
     // 1.5-2x the f32 kernels); opt.f32_mm the f32 ones.
     if (w.type() == GGML_Q4_K && NB % 4 == 0)
-        src = opt.old_mm ? gen_mm_q4k(K, kBatch, 4) : opt.f32_mm ? gen_mm_q4k_sb(K, kBatch) : gen_mm_q4k_h(K, kBatch, 0, q4_sk(w));
+        src = opt.old_mm ? gen_mm_q4k(K, kBatch, 4) : opt.f32_mm ? gen_mm_q4k_sb(K, kBatch) : gen_mm_q4k_h(K, kBatch, 0, mm_sk(w));
     else if (w.type() == GGML_Q6_K && NB % 4 == 0 && NB % 2 == 0)
-        src = opt.old_mm ? gen_mm_q6k(K, kBatch, 2) : opt.f32_mm ? gen_mm_q6k_sb(K, kBatch) : gen_mm_q6k_h(K, kBatch);
+        src = opt.old_mm ? gen_mm_q6k(K, kBatch, 2) : opt.f32_mm ? gen_mm_q6k_sb(K, kBatch) : gen_mm_q6k_h(K, kBatch, mm_sk(w));
     else return nullptr;
     Prog& p = mms_[key];
     std::string e;
@@ -202,7 +203,7 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0) {
         const uint64_t a = addr(w.data), xs = w.type() == GGML_Q6_K ? pxs16_.gpu : pxs32_.gpu;
         const uint64_t x = opt.old_mm || opt.f32_mm ? pxT_.gpu : px16_.gpu;
         const uint32_t args[10] = {lo(a), hi(a), lo(x), hi(x), lo(y), hi(y), (uint32_t)w.ne1(), 0, lo(xs), hi(xs)};
-        const uint32_t g[3] = {(uint32_t)(w.ne1() / 32), 1, 1}, th[3] = {(uint32_t)(w.type() == GGML_Q6_K && opt.old_mm ? 64 : w.type() == GGML_Q4_K && !opt.old_mm && !opt.f32_mm ? 128 * q4_sk(w) : 128), 1, 1};
+        const uint32_t g[3] = {(uint32_t)(w.ne1() / 32), 1, 1}, th[3] = {(uint32_t)(w.type() == GGML_Q6_K && opt.old_mm ? 64 : !opt.old_mm && !opt.f32_mm ? 128 * mm_sk(w) : 128), 1, 1};
         s.dispatch(p->k, p->code.gpu, args, 10, g, th);
     };
     // Tokens t0 .. t0 + n - 1 in one launch (a workgroup a token).

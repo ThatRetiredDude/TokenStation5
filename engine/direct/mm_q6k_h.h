@@ -29,21 +29,35 @@
 
 namespace ts5::direct {
 
-inline std::string gen_mm_q6k_h(int K, int T) {
+// SK (1, 2, 4): groups of 4 waves a workgroup, group g taking blocks g,
+// g + SK, .. (as mm_q4k_h; round 58: SK 2-4 fills the GPU on 4096- and
+// 1024-row matrices). With SK even a group's blocks are all even or all odd,
+// so its alignment shift is fixed and its blocks 210 SK bytes apart.
+inline std::string gen_mm_q6k_h(int K, int T, int SK = 1) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
     const int NB = K / 256, RB = NB * 210, P = T / 2;
+    if (NB % SK || (SK > 1 && SK % 2)) return "";
     const int A = 8, B = 28;                     // 4 pieces of 5 dwords: ql[l], ql[l + 32], qh[l], scales + d
     const int ACC = 48, TMP = 48 + T, U = TMP + P, DSC = U + 8, M32 = U + 12;
     const int SX = 20, SXS = 84;
-    k += ".kernel mm_q6k_h\n.wave32\n.user_sgprs 10\n.tgid_x\n.lds " + S(4 * T * 128) + "\n";
+    k += ".kernel mm_q6k_h\n.wave32\n.user_sgprs 10\n.tgid_x\n.lds " + S(4 * SK * T * 128) + "\n";
     o("v_lshrrev_b32 v2, 5, v0");
-    o("v_readfirstlane_b32 s19, v2");            // w
+    o("v_readfirstlane_b32 s102, v2");           // the wave: 4 g + w
+    o("s_and_b32 s19, s102, 3");                 // w
+    o("s_lshr_b32 s103, s102, 2");               // g
     o("v_and_b32 v0, 31, v0");
     o("s_lshl_b32 s11, s10, 5");
     o("v_add_nc_u32 v3, s11, v0");               // the row
     o("v_mul_u32_u24 v1, " + S(RB) + ", v3");    // its block's aligned start (block 0: aligned, RB a multiple of 4)
+    if (SK > 1) {                                // block g's: 210 g, less 2 when g is odd
+        o("s_mul_i32 s11, s103, 210");
+        o("s_and_b32 s17, s103, 1");
+        o("s_lshl_b32 s17, s17, 1");
+        o("s_sub_u32 s11, s11, s17");
+        o("v_add_nc_u32 v1, s11, v1");
+    }
     o("s_lshr_b32 s17, s19, 1");                 // n
     o("s_and_b32 s18, s19, 1");                  // i
     o("s_lshl_b32 s11, s17, 6");
@@ -70,15 +84,20 @@ inline std::string gen_mm_q6k_h(int K, int T) {
     o("s_lshl_b32 s11, s17, 7");
     o("s_add_u32 s11, s11, s20");
     o("s_mul_i32 s11, s11, " + S(P * 4));
+    o("s_mul_i32 s20, s103, " + S(256 * P * 4));
+    o("s_add_u32 s11, s11, s20");
     o("s_add_u32 s12, s2, s11");
     o("s_addc_u32 s13, s3, 0");
     o("s_lshl_b32 s11, s17, 3");
     o("s_add_u32 s11, s11, s18");
     o("s_mul_i32 s11, s11, " + S(T * 4));
+    o("s_mul_i32 s20, s103, " + S(16 * T * 4));
+    o("s_add_u32 s11, s11, s20");
     o("s_add_u32 s14, s8, s11");
     o("s_addc_u32 s15, s9, 0");
-    o("s_mov_b32 s16, " + S(NB));
-    o("s_mov_b32 s18, 0");                       // this block odd
+    o("s_mov_b32 s16, " + S(NB / SK));
+    if (SK > 1) o("s_and_b32 s18, s103, 1");     // this block odd (all of the group's)
+    else o("s_mov_b32 s18, 0");
     auto sload = [&](int dst, int n, const std::string& base, int off) {
         for (int i = 0; i < n; i += (n - i >= 16 ? 16 : 8)) {
             const int w = n - i >= 16 ? 16 : 8;
@@ -88,12 +107,19 @@ inline std::string gen_mm_q6k_h(int K, int T) {
     sload(SX, 4 * P, "s[12:13]", 0);
     k += "block:\n";
     // the next block's aligned start: + 208 from an even block, + 212 from an odd one
-    o("s_lshl_b32 s17, s18, 2");
-    o("s_add_u32 s17, s17, 208");
+    if (SK > 1) o("s_mov_b32 s17, " + S(210 * SK));
+    else {
+        o("s_lshl_b32 s17, s18, 2");
+        o("s_add_u32 s17, s17, 208");
+    }
     o("v_add_nc_u32 v1, s17, v1");
     o("v_add_nc_u32 v2, s17, v2");
     o("v_add_nc_u32 v4, s17, v4");
+    // the next block's quants, unless this is the last (past the matrix's end)
+    o("s_cmp_eq_u32 s16, 1");
+    o("s_cbranch_scc1 noload");
     load(B);
+    k += "noload:\n";
     o("s_waitcnt vmcnt(8)");
     o("s_cmp_eq_u32 s18, 0");
     o("s_cbranch_scc1 aligned");
@@ -130,7 +156,12 @@ inline std::string gen_mm_q6k_h(int K, int T) {
         const int qq = st / 4, kk = st % 4;
         o("s_waitcnt lgkmcnt(0)");
         if (st + 1 < 16) sload(buf(st + 1), 4 * P, "s[12:13]", xoff(st + 1));
-        else sload(buf(0), 4 * P, "s[12:13]", 256 * P * 4);   // the next block's first step
+        else {   // the next block's first step, unless this is the last
+            o("s_cmp_eq_u32 s16, 1");
+            o("s_cbranch_scc1 nox");
+            sload(buf(0), 4 * P, "s[12:13]", 256 * SK * P * 4);
+            k += "nox:\n";
+        }
         if (kk == 2) sload(SXS, T, "s[14:15]", 2 * qq * T * 4);
         const std::string ql = "v" + S(A + 5 * (qq & 1) + kk), qh = "v" + S(A + 10 + kk);
         const std::string u = "v" + S(U), u1 = "v" + S(U + 1);
@@ -176,26 +207,26 @@ inline std::string gen_mm_q6k_h(int K, int T) {
                     o("v_fmac_f32 v" + S(ACC + t) + ", v" + S(DSC + qq) + ", " + f);
                 }
     }
-    o("s_add_u32 s12, s12, " + S(256 * P * 4));
+    o("s_add_u32 s12, s12, " + S(256 * SK * P * 4));
     o("s_addc_u32 s13, s13, 0");
-    o("s_add_u32 s14, s14, " + S(16 * T * 4));
+    o("s_add_u32 s14, s14, " + S(16 * SK * T * 4));
     o("s_addc_u32 s15, s15, 0");
-    o("s_xor_b32 s18, s18, 1");
+    if (SK == 1) o("s_xor_b32 s18, s18, 1");
     o("s_waitcnt vmcnt(0)");
     for (int i = 0; i < 20; i++) o("v_mov_b32 v" + S(A + i) + ", v" + S(B + i));
     o("s_sub_u32 s16, s16, 1");
     o("s_cmp_lg_u32 s16, 0");
     o("s_cbranch_scc1 block");
     o("v_lshlrev_b32 v5, 2, v0");
-    o("s_mul_i32 s11, s19, " + S(T * 128));
+    o("s_mul_i32 s11, s102, " + S(T * 128));
     o("v_add_nc_u32 v5, s11, v5");
     for (int t = 0; t < T; t++) o("ds_write_b32 v5, v" + S(ACC + t) + " offset:" + S(t * 128));
     o("s_waitcnt lgkmcnt(0)");
     o("s_barrier");
-    o("s_cmp_lg_u32 s19, 0");
+    o("s_cmp_lg_u32 s102, 0");
     o("s_cbranch_scc1 done");
     o("v_lshlrev_b32 v5, 2, v0");
-    for (int w = 1; w < 4; w++) {
+    for (int w = 1; w < 4 * SK; w++) {
         for (int t = 0; t < T; t++) o("ds_read_b32 v" + S(TMP + t) + ", v5 offset:" + S((w * T + t) * 128));
         o("s_waitcnt lgkmcnt(0)");
         for (int t = 0; t < T; t++) o("v_add_f32 v" + S(ACC + t) + ", v" + S(ACC + t) + ", v" + S(TMP + t));

@@ -79,11 +79,11 @@ int cmd_mm_q4k(int argc, char** argv) {
                 : EXP == 13 ? ", f16, TIMING ONLY: no x loads" : EXP == 14 ? ", f16, TIMING ONLY: no unpacking" : EXP == 15 ? ", f16, TIMING ONLY: neither" : "");
     for (const Shape& sh : shapes) {
         const int NB = sh.K / 256;
-        if (EXP >= 12 ? (!q6 && NB % (SPLIT / 4)) : (NB % SPLIT || (q6 && (NB / SPLIT) % 2))) continue;
+        if (EXP >= 12 ? (NB % (SPLIT / 4)) : (NB % SPLIT || (q6 && (NB / SPLIT) % 2))) continue;
         const size_t rb = (size_t)NB * BB, wbytes = rb * sh.R;
         gfx10::Kernel k;
         std::string err;
-        if (!gfx10::assemble(q6 ? (EXP >= 12 ? gen_mm_q6k_h(sh.K, T) : EXP == 10 ? gen_mm_q6k_sb(sh.K, T) : gen_mm_q6k(sh.K, T, SPLIT)) : EXP == 10 ? gen_mm_q4k_sb(sh.K, T) : EXP == 11 ? gen_mm_q4k_sb(sh.K, T, 2) : EXP >= 12 ? gen_mm_q4k_h(sh.K, T, EXP == 16 ? 0 : EXP - 12, q6 ? 1 : SPLIT / 4) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
+        if (!gfx10::assemble(q6 ? (EXP >= 12 ? gen_mm_q6k_h(sh.K, T, SPLIT / 4) : EXP == 10 ? gen_mm_q6k_sb(sh.K, T) : gen_mm_q6k(sh.K, T, SPLIT)) : EXP == 10 ? gen_mm_q4k_sb(sh.K, T) : EXP == 11 ? gen_mm_q4k_sb(sh.K, T, 2) : EXP >= 12 ? gen_mm_q4k_h(sh.K, T, EXP == 16 ? 0 : EXP - 12, q6 ? 1 : SPLIT / 4) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
         kfd::Buffer code, W, xT, xs, Y;
         const size_t cb = (k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
         if (!dev.alloc(cb, kfd::Mem::Gtt, code) || !dev.alloc(wbytes + 4096, kfd::Mem::Gtt, W) ||
