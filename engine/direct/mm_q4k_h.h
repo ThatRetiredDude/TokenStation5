@@ -18,6 +18,7 @@
 // f16 in dword c T/2 + p (low half 2p). Arguments as mm_q4k_sb but s[2:3]
 // is x16. Grid: R / 32 workgroups of 128.
 #pragma once
+#include <algorithm>
 #include <string>
 
 namespace ts5::direct {
@@ -40,7 +41,13 @@ namespace ts5::direct {
 // instructions per multiply-add, the VGPRs a lane unchanged (round 64: the
 // x stream, not the weights, is what costs; 2 rows a lane lost on VGPRs).
 // Grid: R / LN workgroups of 4 LN SK threads.
-inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 1, int LN = 32) {
+//
+// BK (RW 1): VGPR banks (a register's number mod 4; GFX10 stalls an
+// instruction reading two VGPRs of one bank, as LLVM's GCNRegBankReassign
+// avoids). Each pk_fma reads its sum and the weight pair: the f16 sums go in
+// registers of banks 0-2 only and the weight pairs W0 / W1 in bank 3 (round
+// 63: the bare multiply-adds ran at only ~66% of the f16 peak).
+inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 1, int LN = 32, bool BK = true) {
     if (LN == 64 && RW != 1) return "";
     const int LB = LN == 64 ? 6 : 5, L4 = 4 * LN;   // log2 lanes; bytes a row of lanes
     auto S = [](long v) { return std::to_string(v); };
@@ -49,7 +56,11 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
     const int NB = K / 256, RB = NB * 144, P = T / 2;   // dwords of x a column
     if (NB % SK) return "";
     // per row r: quants A + 12 r (B + 12 r), scales SC + 2 r, minimums MN + 2 r, sums ACC + T r, f16 sums TMP + P r
-    const int A = 8, B = A + 12 * RW, SC = B + 12 * RW, MN = SC + 2 * RW, ACC = MN + 2 * RW, TMP = ACC + T * RW, U = TMP + P * RW;
+    const int A = 8, B = A + 12 * RW, SC = B + 12 * RW, MN = SC + 2 * RW, ACC = MN + 2 * RW, TMP = ACC + T * RW;
+    BK = BK && RW == 1 && TMP % 4 == 0;
+    const int U = BK ? TMP + std::max(8, 4 * ((P - 1) / 3) + (P - 1) % 3 + 1) : TMP + P * RW;   // (BK: past W1 = TMP + 7 and the last sum)
+    auto tr = [&](int r, int p) { return BK ? TMP + 4 * (p / 3) + p % 3 : TMP + P * r + p; };   // f16 sum p of row r
+    const int W0 = BK ? TMP + 3 : U + 5, W1 = BK ? TMP + 7 : U + 6;
     const int SX = 20, SXS = 84;                         // x: two sets of 4 columns (4 P); the sub-block sums: T (f32)
     k += ".kernel mm_q4k_h\n" + std::string(LN == 64 ? ".wave64" : ".wave32") + "\n.user_sgprs 10\n.tgid_x\n.lds " + S(4 * SK * RW * T * L4) + "\n";
     o("v_lshrrev_b32 v2, " + S(LB) + ", v0");
@@ -170,7 +181,7 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
         // The quants to f16 pairs by the exponent trick (round 62): a nibble
         // n or'd into 0x6400 is the f16 1024 + n, less 1024 exactly. W0 holds
         // columns 0 and 2 (bytes 0, 2), W1 columns 1 and 3.
-        const std::string q = "v" + S(A + 12 * r + 4 + dw), u = "v" + S(U), w0 = "v" + S(U + 5), w1 = "v" + S(U + 6);
+        const std::string q = "v" + S(A + 12 * r + 4 + dw), u = "v" + S(U), w0 = "v" + S(W0), w1 = "v" + S(W1);
         if (!(exp & 2)) {
             if (jj) {
                 o("v_lshrrev_b32 " + u + ", 4, " + q);
@@ -187,7 +198,7 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
             const std::string w = exp & 2 ? q : (c & 1) ? w1 : w0;
             const bool hi = c >> 1;
             for (int p = 0; p < P; p++) {
-                const std::string x = "s" + S(buf(st) + c * P + p), d = "v" + S(TMP + P * r + p);
+                const std::string x = "s" + S(buf(st) + c * P + p), d = "v" + S(tr(r, p));
                 if (dw == 0 && c == 0) o("v_pk_mul_f16 " + d + ", " + x + ", " + w + (hi ? " op_sel:[0,1] op_sel_hi:[1,1]" : " op_sel_hi:[1,0]"));
                 else o("v_pk_fma_f16 " + d + ", " + x + ", " + w + ", " + d + (hi ? " op_sel:[0,1,0] op_sel_hi:[1,1,1]" : " op_sel_hi:[1,0,1]"));
             }
@@ -202,7 +213,7 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
                 for (int h = 0; h < 2; h++) {
                     const int t = 2 * p + h;
                     for (int r = 0; r < RW; r++) {
-                        const std::string a = "v" + S(ACC + T * r + t), tmp = "v" + S(TMP + P * r + p);
+                        const std::string a = "v" + S(ACC + T * r + t), tmp = "v" + S(tr(r, p));
                         o("v_fma_mix_f32 " + a + ", v" + S(U + 5 + r) + ", " + tmp + ", " + a + " op_sel:[0," + S(h) + ",0] op_sel_hi:[0,1,0]");
                         o("v_fma_f32 " + a + ", -v" + S(MN + 2 * r + jj) + ", s" + S(SXS + t) + ", " + a);
                     }
@@ -227,12 +238,12 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
     o("s_cmp_lg_u32 s18, 0");
     o("s_cbranch_scc1 done");
     o("v_lshlrev_b32 v5, 2, v0");
-    // (TMP and U, contiguous, hold the T partials read back)
+    // (the quants' registers A .., free now, hold the T partials read back)
     for (int w = 1; w < 4 * SK; w++)
         for (int r = 0; r < RW; r++) {
-            for (int t = 0; t < T; t++) o("ds_read_b32 v" + S(TMP + t) + ", v5 offset:" + S(((w * RW + r) * T + t) * L4));
+            for (int t = 0; t < T; t++) o("ds_read_b32 v" + S(A + t) + ", v5 offset:" + S(((w * RW + r) * T + t) * L4));
             o("s_waitcnt lgkmcnt(0)");
-            for (int t = 0; t < T; t++) o("v_add_f32 v" + S(ACC + T * r + t) + ", v" + S(ACC + T * r + t) + ", v" + S(TMP + t));
+            for (int t = 0; t < T; t++) o("v_add_f32 v" + S(ACC + T * r + t) + ", v" + S(ACC + T * r + t) + ", v" + S(A + t));
         }
     for (int t = 0; t < T; t++) {
         o("s_mul_i32 s17, s6, " + S(4 * t));
