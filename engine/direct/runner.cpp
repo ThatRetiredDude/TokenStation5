@@ -140,7 +140,11 @@ namespace {
 struct Pace {
     int fd = -1, long_tokens = 1024;
     double hot = 83, cool = 75;   // round 82: 80/70 gave 873-903 tok/s, 83/75 928 at Tctl max 78.75
-    double hot_long = 88, cool_long = 82;   // round 85: pp2048 783 (83/75: 688), die max 87.5
+    // Round 93: unpaced, pp8192 settles at 85.75-86.5 C and runs a steady
+    // ~602 tok/s; at 88/82 one 50 ms spike to 88 cost a pause and 12%
+    // (527). So 89/83, a pause needs two layers in a row at HOT or one at
+    // HOT + 1 (TS5_DIRECT_HOT_LONG / COOL_LONG still override).
+    double hot_long = 89, cool_long = 83;   // round 85: 88/82 pp2048 783 (83/75: 688)
     Pace() {
         const char* e = std::getenv("TS5_DIRECT_PACE");
         if (e && std::atoi(e) == 0) return;
@@ -562,7 +566,10 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
             if (lseq_ > 2 && !dev_.wait(lf, lseq_ - 2, 60000)) return false;
             const bool lp = prompt_tokens_ >= pace().long_tokens;
             const double hot = lp ? pace().hot_long : pace().hot, cool = lp ? pace().cool_long : pace().cool;
-            if (pace().read() >= hot) {
+            const double tc = pace().read();
+            hot_n_ = tc >= hot ? hot_n_ + 1 : 0;
+            if (hot_n_ >= 2 || tc >= hot + 1) {
+                hot_n_ = 0;
                 const auto t0 = std::chrono::steady_clock::now();
                 if (lseq_ > 1 && !dev_.wait(lf, lseq_ - 1, 60000)) return false;
                 for (int i = 0; i < 500 && pace().read() > cool; i++)

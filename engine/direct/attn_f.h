@@ -21,7 +21,10 @@
 
 namespace ts5::direct {
 
-inline std::string gen_attn_f() {
+// x: timing experiments for attn-bench (results wrong): 1 no Q.K LDS reads,
+// 2 no P.V LDS reads, 4 no softmax step, 8 no Q.K multiply-adds, 16 no P.V
+// multiply-adds, 32 no K/V staging (global loads, LDS writes, barriers).
+inline std::string gen_attn_f(int x = 0) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
@@ -114,31 +117,36 @@ inline std::string gen_attn_f() {
         o("global_load_dwordx4 " + vr(PF + 8, 4) + ", v9, s[4:5]");
         o("global_load_dwordx4 " + vr(PF + 12, 4) + ", v9, s[4:5] offset:16");
     };
-    prefetch();
-    k += "chunk:\n";
-    o("s_waitcnt vmcnt(0)");
-    o("s_barrier");                                // everyone done with the last chunk's K, V
-    o("ds_write_b128 v8, " + vr(PF, 4) + " offset:" + S(LK));
-    o("ds_write_b128 v8, " + vr(PF + 4, 4) + " offset:" + S(LK + 16));
-    o("ds_write_b128 v236, " + vr(PF + 8, 4) + " offset:" + S(LV));
-    o("ds_write_b128 v236, " + vr(PF + 12, 4) + " offset:" + S(LV + 16));
-    o("s_waitcnt lgkmcnt(0)");
-    o("s_barrier");
-    o("s_add_u32 s27, s24, 32");
-    o("s_cmp_ge_u32 s27, s22");
-    o("s_cbranch_scc1 nopf");
-    o("s_mov_b32 s28, s24");
-    o("s_mov_b32 s24, s27");
-    prefetch();
-    o("s_mov_b32 s24, s28");
-    k += "nopf:\n";
+    if (x & 32) {
+        k += "chunk:\n";
+    } else {
+        prefetch();
+        k += "chunk:\n";
+        o("s_waitcnt vmcnt(0)");
+        o("s_barrier");                                // everyone done with the last chunk's K, V
+        o("ds_write_b128 v8, " + vr(PF, 4) + " offset:" + S(LK));
+        o("ds_write_b128 v8, " + vr(PF + 4, 4) + " offset:" + S(LK + 16));
+        o("ds_write_b128 v236, " + vr(PF + 8, 4) + " offset:" + S(LV));
+        o("ds_write_b128 v236, " + vr(PF + 12, 4) + " offset:" + S(LV + 16));
+        o("s_waitcnt lgkmcnt(0)");
+        o("s_barrier");
+        o("s_add_u32 s27, s24, 32");
+        o("s_cmp_ge_u32 s27, s22");
+        o("s_cbranch_scc1 nopf");
+        o("s_mov_b32 s28, s24");
+        o("s_mov_b32 s24, s27");
+        prefetch();
+        o("s_mov_b32 s24, s28");
+        k += "nopf:\n";
+    }
     // ---- scores: 16 steps of 8 dims; q rows 4 rg + i, k rows 4 lo + j (v4 + 256 j)
     auto qk_read = [&](int st) {
+        if (x & 1) return;
         const int b = B + 32 * (st % 2);
         for (int i = 0; i < 4; i++) o("ds_read_b128 " + vr(b + 4 * i, 4) + ", v3 offset:" + S(LQ + 32 * QS * i + 16 * st));
         for (int j = 0; j < 4; j++) o("ds_read_b128 " + vr(b + 16 + 4 * j, 4) + ", v4 offset:" + S(8 * KS * j + 16 * st));
     };
-    for (int x = 0; x < 16; x++) o("v_mov_b32 " + v(SC + x) + ", 0");
+    for (int y = 0; y < 16; y++) o("v_mov_b32 " + v(SC + y) + ", 0");
     qk_read(0);
     for (int st = 0; st < 16; st++) {
         if (st + 1 < 16) {
@@ -148,16 +156,16 @@ inline std::string gen_attn_f() {
             o("s_waitcnt lgkmcnt(0)");
         }
         const int b = B + 32 * (st % 2);
-        for (int p = 0; p < 4; p++)
+        for (int p = 0; p < 4 && !(x & 8); p++)
             for (int i = 0; i < 4; i++)
                 for (int j = 0; j < 4; j++) {
                     const std::string a = v(ACC + 4 * i + j);
                     o("v_pk_fma_f16 " + a + ", " + v(b + 4 * i + p) + ", " + v(b + 16 + 4 * j + p) + ", " + (st % 4 == 0 && p == 0 ? "0" : a));
                 }
         if (st % 4 == 3)                           // 32 dims: into f32
-            for (int x = 0; x < 16; x++) {
-                o("v_fma_mix_f32 " + v(SC + x) + ", " + v(ACC + x) + ", 1.0, " + v(SC + x) + " op_sel:[0,0,0] op_sel_hi:[1,0,0]");
-                o("v_fma_mix_f32 " + v(SC + x) + ", " + v(ACC + x) + ", 1.0, " + v(SC + x) + " op_sel:[1,0,0] op_sel_hi:[1,0,0]");
+            for (int y = 0; y < 16; y++) {
+                o("v_fma_mix_f32 " + v(SC + y) + ", " + v(ACC + y) + ", 1.0, " + v(SC + y) + " op_sel:[0,0,0] op_sel_hi:[1,0,0]");
+                o("v_fma_mix_f32 " + v(SC + y) + ", " + v(ACC + y) + ", 1.0, " + v(SC + y) + " op_sel:[1,0,0] op_sel_hi:[1,0,0]");
             }
     }
     // ---- mask the chunk that crosses a limit (a thread's rows share one)
@@ -172,15 +180,22 @@ inline std::string gen_attn_f() {
     }
     k += "nomask:\n";
     // ---- softmax step: row max over the 8 lanes, scale, p
-    for (int i = 0; i < 4; i++) {
+    if (x & 4) {
+        for (int i = 0; i < 4; i++) {
+            o("v_cvt_pkrtz_f16_f32 v14, " + v(SC + 4 * i) + ", " + v(SC + 4 * i + 1));
+            o("v_cvt_pkrtz_f16_f32 v15, " + v(SC + 4 * i + 2) + ", " + v(SC + 4 * i + 3));
+            o("ds_write_b64 v5, v[14:15] offset:" + S(32 * PS * i));
+        }
+    }
+    for (int i = 0; i < 4 && !(x & 4); i++) {
         o("v_max_f32 " + v(AL + i) + ", " + v(SC + 4 * i) + ", " + v(SC + 4 * i + 1));
         o("v_max3_f32 " + v(AL + i) + ", " + v(AL + i) + ", " + v(SC + 4 * i + 2) + ", " + v(SC + 4 * i + 3));
     }
     o("v_nop");
     o("v_nop");
-    for (int i = 0; i < 4; i++)
-        for (int x : {1, 2, 4}) o("v_max_f32_dpp " + v(AL + i) + ", " + v(AL + i) + ", " + v(AL + i) + " row_xmask:" + S(x) + " row_mask:0xf bank_mask:0xf");
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 4 && !(x & 4); i++)
+        for (int xm : {1, 2, 4}) o("v_max_f32_dpp " + v(AL + i) + ", " + v(AL + i) + ", " + v(AL + i) + " row_xmask:" + S(xm) + " row_mask:0xf bank_mask:0xf");
+    for (int i = 0; i < 4 && !(x & 4); i++) {
         o("v_max_f32 v14, " + v(M + i) + ", " + v(AL + i));   // new max
         o("v_sub_f32 " + v(AL + i) + ", " + v(M + i) + ", v14");
         o("v_exp_f32 " + v(AL + i) + ", " + v(AL + i));       // the old sums' scale
@@ -199,6 +214,7 @@ inline std::string gen_attn_f() {
     o("s_waitcnt lgkmcnt(0)");                     // P rows: this wave's own lanes
     // ---- out += p v: 8 steps of 4 positions; P rows 4 rg + i (v6 + 64 i), V rows (v7 + 256 pos)
     auto pv_read = [&](int st) {
+        if (x & 2) return;
         const int b = B + 40 * (st % 2);
         for (int i = 0; i < 4; i++) o("ds_read_b64 " + vr(b + 2 * i, 2) + ", v6 offset:" + S(32 * PS * i + 8 * st));
         for (int q = 0; q < 4; q++) {
@@ -215,7 +231,7 @@ inline std::string gen_attn_f() {
             o("s_waitcnt lgkmcnt(0)");
         }
         const int b = B + 40 * (st % 2);
-        for (int q = 0; q < 4; q++)
+        for (int q = 0; q < 4 && !(x & 16); q++)
             for (int i = 0; i < 4; i++)
                 for (int dp = 0; dp < 8; dp++) {
                     const std::string a = v(ACC + 8 * i + dp), h = S(q % 2);
@@ -236,7 +252,7 @@ inline std::string gen_attn_f() {
     o("v_nop");
     o("v_nop");
     for (int i = 0; i < 4; i++)
-        for (int x : {1, 2, 4}) o("v_add_f32_dpp " + v(L + i) + ", " + v(L + i) + ", " + v(L + i) + " row_xmask:" + S(x) + " row_mask:0xf bank_mask:0xf");
+        for (int xm : {1, 2, 4}) o("v_add_f32_dpp " + v(L + i) + ", " + v(L + i) + ", " + v(L + i) + " row_xmask:" + S(xm) + " row_mask:0xf bank_mask:0xf");
     // base = (t0 + tt) s11 + 2112 (split 8 + g); row i = head i: out + 512 i + 64 lo
     o("v_add_nc_u32 v9, s20, v1");
     o("v_mul_lo_u32 v9, s11, v9");
@@ -244,8 +260,8 @@ inline std::string gen_attn_f() {
     o("v_add_nc_u32 v9, s26, v9");
     o("v_lshl_add_u32 v14, v2, 6, v9");
     for (int i = 0; i < 4; i++)
-        for (int x = 0; x < 4; x++)
-            o("global_store_dwordx4 v14, " + vr(O + 16 * i + 4 * x, 4) + ", s[8:9] offset:" + S(32 + 512 * i + 16 * x));
+        for (int y = 0; y < 4; y++)
+            o("global_store_dwordx4 v14, " + vr(O + 16 * i + 4 * y, 4) + ", s[8:9] offset:" + S(32 + 512 * i + 16 * y));
     o("v_cmp_eq_u32 vcc_lo, 0, v2");
     o("s_and_b32 exec_lo, exec_lo, vcc_lo");
     o("global_store_dwordx4 v9, " + vr(M, 4) + ", s[8:9]");

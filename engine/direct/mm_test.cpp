@@ -14,6 +14,7 @@
 #include "../src/quants.h"
 #include "gfx10_asm.h"
 #include "kfd.h"
+#include "attn_f.h"
 #include "mm_q4k.h"
 #include "mm_q4k_sb.h"
 #include "mm_q4k_h.h"
@@ -523,6 +524,76 @@ int cmd_fma_peak(int, char**) {
             const double sec = st[st.size() / 2], fl = (double)wg * 256 * iters * 128 * (var < 2 ? 4 : 2);
             std::printf("fma-peak %-4s %4d workgroups of 256: %8.3f ms, %6.2f TFLOP/s, %.0f instructions a SIMD a us (%d VGPRs)\n", names[var], wg, sec * 1e3,
                         fl / sec / 1e12, (double)wg * 8 * iters * 128 / sec / 1e6 / 80, k.vgprs);
+            std::fflush(stdout);
+        }
+    }
+    return 0;
+}
+
+// ts5-direct attn-bench [depth ...]: attn_f alone (a 512-token prompt pass at
+// each depth, Qwen3 8B's shapes, random data), timed, with gen_attn_f's
+// knock-out experiments (round 94: attention runs at ~4 TFLOP/s against
+// ~22 for packed f16; which part holds it back?). No model needed.
+int cmd_attn_bench(int argc, char** argv) {
+    std::vector<int> depths;
+    for (int i = 2; i < argc; i++) depths.push_back(std::atoi(argv[i]));
+    if (depths.empty()) depths = {0, 3584, 7680};
+    const int NT = 512, NKV = 8, maxpos = 16384;
+    kfd::Device dev;
+    if (!dev.open() || !dev.create_queue(1 << 20)) { std::fprintf(stderr, "attn-bench: %s\n", dev.err().c_str()); return 1; }
+    uint64_t* sig = (uint64_t*)dev.signals.cpu;
+    uint64_t seq = 0;
+    sig[0] = 0;
+    const size_t part_bytes = (size_t)64 * NKV * 2112;
+    kfd::Buffer ts, code, q, kc, vc, part;
+    if (!dev.alloc(4096, kfd::Mem::Gtt, ts) || !dev.alloc(1 << 20, kfd::Mem::Gtt, code) || !dev.alloc((size_t)NT * 16384, kfd::Mem::Gtt, q) ||
+        !dev.alloc((size_t)maxpos * 2048, kfd::Mem::Gtt, kc) || !dev.alloc((size_t)maxpos * 2048, kfd::Mem::Gtt, vc) ||
+        !dev.alloc(part_bytes * NT, kfd::Mem::Gtt, part)) {
+        std::fprintf(stderr, "attn-bench: %s\n", dev.err().c_str());
+        return 1;
+    }
+    uint32_t r = 12345;
+    auto rnd = [&]() { r = r * 1664525u + 1013904223u; return ((r >> 8) & 0xffff) / 32768.0f - 1.0f; };
+    for (size_t i = 0; i < (size_t)NT * 4096; i++) ((float*)q.cpu)[i] = rnd();
+    for (size_t i = 0; i < (size_t)maxpos * 1024; i++) {
+        ((uint16_t*)kc.cpu)[i] = 0x3000 | (uint16_t)(r & 0x3ff) | (uint16_t)((i & 1) << 15), rnd();
+        ((uint16_t*)vc.cpu)[i] = 0x3400 | (uint16_t)(r & 0x3ff) | (uint16_t)((i & 2) << 14), rnd();
+    }
+    const float scale = 1.0f / std::sqrt(128.0f);
+    uint32_t scale_bits;
+    std::memcpy(&scale_bits, &scale, 4);
+    const int modes[] = {0, 1, 2, 3, 4, 8, 16, 24, 32, 39};
+    const char* names[] = {"full", "no qk reads", "no pv reads", "no lds reads", "no softmax", "no qk fma", "no pv fma", "no fma", "no staging", "fma only"};
+    for (int mi = 0; mi < (int)(sizeof(modes) / sizeof(modes[0])); mi++) {
+        gfx10::Kernel k;
+        std::string err;
+        if (!gfx10::assemble(gen_attn_f(modes[mi]), k, &err)) { std::fprintf(stderr, "attn-bench: %s\n", err.c_str()); return 1; }
+        std::memcpy(code.cpu, k.code.data(), k.code.size() * 4);
+        for (int pos0 : depths) {
+            const uint32_t nl = pos0 + NT, nch = (nl + 255) / 256, per = (nch + 9) / 10, splits = (nch + per - 1) / per;
+            const uint32_t a1[14] = {(uint32_t)q.gpu, (uint32_t)(q.gpu >> 32), (uint32_t)kc.gpu, (uint32_t)(kc.gpu >> 32), (uint32_t)vc.gpu, (uint32_t)(vc.gpu >> 32),
+                                     (uint32_t)pos0, scale_bits, (uint32_t)part.gpu, (uint32_t)(part.gpu >> 32), per * 256, (uint32_t)part_bytes, nl, 0};
+            const uint32_t g[3] = {splits * NKV, NT / 32, 1}, th[3] = {256, 1, 1};
+            std::vector<double> st;
+            for (int rep = 0; rep < 6; rep++) {
+                pm4::Stream w;
+                w.acquire_all();
+                w.release(ts.gpu, 0, true);
+                w.dispatch(k, code.gpu, a1, 14, g, th);
+                w.wait_kernels();
+                w.release(ts.gpu + 8, 0, true);
+                w.release(dev.signals.gpu, ++seq);
+                if (!dev.submit(w.w) || !dev.wait((volatile uint64_t*)sig, seq, 20000)) { std::fprintf(stderr, "attn-bench: %s\n", dev.err().c_str()); return 1; }
+                const uint64_t* tt = (const uint64_t*)ts.cpu;
+                if (rep) st.push_back((tt[1] - tt[0]) / 100e6);
+            }
+            std::sort(st.begin(), st.end());
+            const double sec = st[st.size() / 2];
+            double pairs = 0;
+            for (int t = 0; t < NT; t++) pairs += pos0 + t + 1;
+            const double fl = pairs * 32 * 128 * 4;
+            std::printf("attn-bench %-12s depth %5d: %8.1f us a layer (%5.3f ms a token over 36 layers), %5.2f TFLOP/s, %d VGPRs, %zu bytes of code\n", names[mi], pos0,
+                        sec * 1e6, sec * 36 / NT * 1e3, fl / sec / 1e12, k.vgprs, k.code.size() * 4);
             std::fflush(stdout);
         }
     }

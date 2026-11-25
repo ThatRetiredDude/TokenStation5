@@ -110,6 +110,7 @@ private:
     size_t kv_layer_ = 0;
     uint32_t wgs_ = 0, step_ = 0, scale_bits_ = 0;
     uint64_t seq_ = 0, lseq_ = 0;
+    int hot_n_ = 0;   // layers in a row at or above the pacing line
     int pauses_ = 0, prompt_tokens_ = 0;
     double pause_s_ = 0;
     int nstamps_ = 0;
