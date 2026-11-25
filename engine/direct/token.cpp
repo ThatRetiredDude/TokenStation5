@@ -339,6 +339,26 @@ int cmd_token(int argc, char** argv) {
                 std::fflush(stdout);
             }
             R.opt.attn_pairs = pairs;
+            // Round 89: generation at depth: 16 tokens at positions ctx - 32 ..,
+            // each waited for and profiled (the cache is full from above).
+            {
+                const bool was = R.opt.profile;
+                R.opt.profile = true;
+                std::vector<double> acc(S_COUNT, 0.0), gms;
+                for (int p = ctx - 32; p < ctx - 16; p++) {
+                    if (!R.send(-1, p) || !R.wait_all(20000)) return fail(R.err() + " (deep generation)");
+                    R.add_profile(acc);
+                    gms.push_back((R.t_end(R.sent() - 1) - R.t_start(R.sent() - 1)) / 100e6 * 1e3);
+                }
+                R.opt.profile = was;
+                std::sort(gms.begin(), gms.end());
+                double tot = 0;
+                for (double x : acc) tot += x;
+                std::printf("generation profile at depth %d (16 tokens, each waited for; GPU %.2f ms median a token):\n", ctx - 32, gms[8]);
+                for (int i = 0; i < S_COUNT; i++)
+                    if (acc[i] > 0) std::printf("  %-18s %8.3f ms  %5.1f%%\n", kStepName[i], acc[i] / 16 * 1e3, 100 * acc[i] / tot);
+                std::fflush(stdout);
+            }
         }
     } else {
         std::printf("prompt batches: not available for this model\n");
