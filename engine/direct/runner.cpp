@@ -165,11 +165,12 @@ struct Pace {
     int fd = -1, long_tokens = 1024;
     int soc_fd = -1;                       // ps5_fan's "MainSoC" (round 113)
     // Round 115: at MainSoC 77 (under the old knee of 78) a 7k chat prefill
-    // still went 76 -> 91.25 C in ~0.25 s; the soak's prefills ride 89-89.75
-    // from MainSoC ~72 on. So from 70, half a degree off both lines per
-    // degree over (MainSoC 77: 85.5 / 79.5 on a long prompt). A cold start
-    // (benchmarks, the 12-turn chat at MainSoC <= 71) is unchanged.
-    double soc_knee = 70, soc_slope = 0.5, soc_max = 8;
+    // still went 76 -> 91.25 C in ~0.25 s. Round 116: from 70 at half a
+    // degree a degree (77: 85.5 / 79.5) the 15-minute soak ran through
+    // (peak 90.0) but the 12-turn chat (MainSoC <= 71) lost 1.7%. So from
+    // 74, a degree a degree (77: 86 / 80, 83: 81 / 75): the margin where it
+    // was needed, nothing below.
+    double soc_knee = 74, soc_slope = 1, soc_max = 8;
     double hot = 83, cool = 75;   // round 82: 80/70 gave 873-903 tok/s, 83/75 928 at Tctl max 78.75
     // Round 93: unpaced, pp8192 settles at 85.75-86.5 C and runs a steady
     // ~602 tok/s; at 88/82 one 50 ms spike to 88 cost a pause and 12%
@@ -633,8 +634,8 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
             const bool lp = prompt_tokens_ >= pace().long_tokens;
             // Round 113: after ~2 minutes of non-stop work the PS5's MainSoC
             // sensor soaks to ~85 C, Tctl rides 90-90.75 and a 13.5k prompt
-            // at 89 / 83 crossed 91. Past TS5_DIRECT_SOC_KNEE (default 70 C)
-            // both lines come down TS5_DIRECT_SOC_SLOPE (0.5) a degree MainSoC
+            // at 89 / 83 crossed 91. Past TS5_DIRECT_SOC_KNEE (default 74 C)
+            // both lines come down TS5_DIRECT_SOC_SLOPE (1) a degree MainSoC
             // is over it, at most TS5_DIRECT_SOC_MAX (default 8).
             const double soc = pace().read_soc(), adj = soc > pace().soc_knee ? std::min(pace().soc_max, pace().soc_slope * (soc - pace().soc_knee)) : 0.0;
             const double hot = (lp ? pace().hot_long : pace().hot) - adj, cool = (lp ? pace().cool_long : pace().cool) - adj;
