@@ -8,6 +8,11 @@
 // Precision: x and the 4-bit quants in f16 (the quants exactly), each
 // 32-value sub-block's sum in f16, then into f32 with its scale (d sc) and
 // the minimum term (dmin m xs, all f32), as round 49's kernel.
+// x16 is x 2^-E, E per 32 columns and token so that |x 2^-E| < 16 (each
+// sum stays under 32 x 15 x 16 = 7680; round 53: unscaled, Qwen3's
+// activations overflowed f16's 65504 and gave NaN). E is the low byte of
+// xs32 (to_xT, its value's last 8 bits: 2^-15 relative), undone exactly
+// with ldexp before the f32 scale.
 //
 // x16: K x T/2 dwords (to_xT writes it): column c's tokens 2p, 2p + 1 as
 // f16 in dword c T/2 + p (low half 2p). Arguments as mm_q4k_sb but s[2:3]
@@ -137,6 +142,8 @@ inline std::string gen_mm_q4k_h(int K, int T) {
                     } else {
                         o("v_cvt_f32_f16 " + f + ", v" + S(TMP + p));
                     }
+                    o("s_sext_i32_i8 s17, s" + S(SXS + t));   // x16's scale exponent (to_xT)
+                    o("v_ldexp_f32 " + f + ", " + f + ", s17");
                     o("v_fmac_f32 " + a + ", v" + S(SC + jj) + ", " + f);
                     o("v_fma_f32 " + a + ", -v" + S(MN + jj) + ", s" + S(SXS + t) + ", " + a);
                 }

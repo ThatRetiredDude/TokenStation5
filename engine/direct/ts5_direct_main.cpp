@@ -42,6 +42,7 @@ namespace ts5::direct {
 int cmd_token(int argc, char** argv);   // token.cpp (its own device, runner.h)
 int cmd_mm_q4k(int argc, char** argv);  // mm_test.cpp
 int cmd_xt_bench(int argc, char** argv);  // mm_test.cpp
+int cmd_dot_test(int argc, char** argv);  // mm_test.cpp
 }
 
 namespace {
@@ -998,6 +999,7 @@ int main(int argc, char** argv) {
     if (cmd == "token") return ts5::direct::cmd_token(argc, argv);
     if (cmd == "mm-q4k" || cmd == "mm-q6k") return ts5::direct::cmd_mm_q4k(argc, argv);
     if (cmd == "xt-bench") return ts5::direct::cmd_xt_bench(argc, argv);
+    if (cmd == "dot-test") return ts5::direct::cmd_dot_test(argc, argv);
     kfd::Device dev;
     if (!dev.open()) return die(dev.err());
     if (cmd == "info") return cmd_info(dev);

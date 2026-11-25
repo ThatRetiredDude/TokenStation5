@@ -15,7 +15,9 @@ namespace ts5::direct {
 // a workgroup, 16-48 workgroups, sums by 16-32 serial LDS reads) took 24%
 // of a prompt's time.
 // Also x16 (K x T/2 dwords: the f16 kernels' x, a column's tokens in
-// pairs, low half the even one).
+// pairs, low half the even one), scaled by 2^-E for each 32 columns and
+// token so that |x16| < 16, with E (int8) in the low byte of xs16 and xs32
+// (they lose their last 8 bits, 2^-15 relative).
 // Arguments: s[0:1] Y, s[2:3] xT, s[4:5] xs32, s[6:7] xs16, s[8:9] x16;
 // s10 workgroup id. Grid: K / C workgroups of 256. T is 8 or 16.
 inline std::string gen_to_xT(int K, int T) {
@@ -24,7 +26,7 @@ inline std::string gen_to_xT(int K, int T) {
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
     const int LT = T == 16 ? 4 : 3, C = 1024 / T, TPT = 256 / T;   // columns a workgroup, threads a token
     const int LTPT = 8 - LT;
-    k += ".kernel to_xT\n.wave32\n.user_sgprs 10\n.tgid_x\n.lds 4096\n";
+    k += ".kernel to_xT\n.wave32\n.user_sgprs 10\n.tgid_x\n.lds 8192\n";
     o("v_lshrrev_b32 v1, " + S(LTPT) + ", v0");          // t
     o("v_and_b32 v2, " + S(TPT - 1) + ", v0");           // q: columns 4q .. 4q + 3 of the workgroup's
     o("v_mul_u32_u24 v3, " + S(K * 4) + ", v1");
@@ -50,6 +52,26 @@ inline std::string gen_to_xT(int K, int T) {
     o("v_nop");
     o("v_nop");
     o("v_add_f32_dpp v13, v12, v12 row_xmask:4 row_mask:0xf bank_mask:0xf");
+    // the 32 columns' max |x| (each token's): x16 = x 2^-E with E = its
+    // exponent - 3, so |x16| < 16; E into xs16's and xs32's low byte
+    o("v_max3_f32 v14, |v8|, |v9|, |v10|");
+    o("v_max3_f32 v14, v14, |v11|, v14");
+    for (int m : {1, 2, 4}) {
+        o("v_nop");
+        o("v_nop");
+        o("v_max_f32_dpp v14, v14, v14 row_xmask:" + S(m) + " row_mask:0xf bank_mask:0xf");
+    }
+    o("v_lshrrev_b32 v15, 23, v14");
+    o("v_add_nc_u32 v15, 0xffffff7e, v15");             // E = biased exponent - 130 (2^E <= max/8)
+    o("v_max_i32 v15, 0xffffff9c, v15");                // at least -100 (zero or tiny: fits a byte)
+    o("v_sub_nc_u32 v16, 0, v15");
+    for (int i = 0; i < 4; i++) o("v_ldexp_f32 v" + S(18 + i) + ", v" + S(8 + i) + ", v16");
+    o("ds_write_b128 v4, v[18:21] offset:4096");
+    o("v_and_b32 v15, 0xff, v15");
+    o("v_and_b32 v12, 0xffffff00, v12");
+    o("v_or_b32 v12, v12, v15");
+    o("v_and_b32 v13, 0xffffff00, v13");
+    o("v_or_b32 v13, v13, v15");
     // xs16: lanes q % 4 == 0, at (wg C/16 + q/4) T + t
     o("s_mul_i32 s18, s10, " + S(C / 16 * T * 4));
     o("v_lshrrev_b32 v5, 2, v2");
@@ -80,14 +102,15 @@ inline std::string gen_to_xT(int K, int T) {
     o("v_mul_u32_u24 v2, " + S(4 * C * 4) + ", v2");     // t0 C 4
     o("v_lshl_add_u32 v2, v1, 2, v2");
     for (int i = 0; i < 4; i++) o("ds_read_b32 v" + S(8 + i) + ", v2 offset:" + S(i * C * 4));
+    for (int i = 0; i < 4; i++) o("ds_read_b32 v" + S(14 + i) + ", v2 offset:" + S(4096 + i * C * 4));
     o("s_lshl_b32 s18, s10, 12");
     o("s_add_u32 s12, s2, s18");
     o("s_addc_u32 s13, s3, 0");
     o("v_lshlrev_b32 v3, 4, v0");
     o("s_waitcnt lgkmcnt(0)");
     o("global_store_dwordx4 v3, v[8:11], s[12:13]");
-    o("v_cvt_pkrtz_f16_f32 v12, v8, v9");
-    o("v_cvt_pkrtz_f16_f32 v13, v10, v11");
+    o("v_cvt_pkrtz_f16_f32 v12, v14, v15");
+    o("v_cvt_pkrtz_f16_f32 v13, v16, v17");
     o("s_lshl_b32 s17, s10, 11");
     o("s_add_u32 s12, s8, s17");
     o("s_addc_u32 s13, s9, 0");

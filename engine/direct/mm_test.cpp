@@ -96,6 +96,17 @@ int cmd_mm_q4k(int argc, char** argv) {
         }
         std::vector<float> X((size_t)T * sh.K);
         for (float& v : X) v = (float)((int)(rnd() >> 16) - 32768) / 32768.0f;
+        if (EXP == 12)   // a few tokens far outside f16's range once summed (round 53: Qwen3's activations)
+            for (int t = 3; t < T; t += 4)
+                for (int c = 0; c < sh.K; c++) X[(size_t)t * sh.K + c] *= 4000.0f;
+        // to_xT's x16 scale exponent of each 32 columns and token
+        auto scale_e = [&](int t, int c0) {
+            float m = 0;
+            for (int c = c0 & ~31; c < (c0 & ~31) + 32; c++) m = std::max(m, std::fabs(X[(size_t)t * sh.K + c]));
+            uint32_t b;
+            std::memcpy(&b, &m, 4);
+            return std::max((int)(b >> 23) - 130, -100);
+        };
         float* xt = (float*)xT.cpu;
         float* xsum = (float*)xs.cpu;
         for (int c = 0; c < sh.K; c++)
@@ -103,13 +114,19 @@ int cmd_mm_q4k(int argc, char** argv) {
         if (EXP == 12) {   // the f16 kernel reads x16: a column's tokens in pairs, f16
             uint16_t* x16 = (uint16_t*)xT.cpu;
             for (int c = 0; c < sh.K; c++)
-                for (int t = 0; t < T; t++) x16[(size_t)c * T + t] = fp32_to_fp16(X[(size_t)t * sh.K + c]);
+                for (int t = 0; t < T; t++) x16[(size_t)c * T + t] = fp32_to_fp16(std::ldexp(X[(size_t)t * sh.K + c], -scale_e(t, c)));
         }
         for (int s = 0; s < sh.K / SUB; s++)
             for (int t = 0; t < T; t++) {
                 float a = 0;
                 for (int c = 0; c < SUB; c++) a += X[(size_t)t * sh.K + SUB * s + c];
                 xsum[(size_t)s * T + t] = a;
+                if (EXP == 12) {   // the exponent in the sum's low byte
+                    uint32_t b;
+                    std::memcpy(&b, &a, 4);
+                    b = (b & ~0xffu) | ((uint32_t)scale_e(t, SUB * s) & 0xff);
+                    std::memcpy(&xsum[(size_t)s * T + t], &b, 4);
+                }
             }
         // CPU reference, and each row's sum of |terms| to judge errors by.
         std::vector<double> ref((size_t)T * sh.R), mag((size_t)T * sh.R);
@@ -243,6 +260,7 @@ int cmd_xt_bench(int, char**) {
                 const float* y = (const float*)Y.cpu;
                 const float* xt = (const float*)xT.cpu;
                 double worst = 0;
+                std::vector<int> e32((size_t)K / 32 * T);
                 for (int c = 0; c < K; c++)
                     for (int t = 0; t < T; t++) worst = std::max(worst, (double)std::fabs(xt[(size_t)c * T + t] - y[(size_t)t * K + c]));
                 for (int sub : {16, 32}) {
@@ -251,14 +269,26 @@ int cmd_xt_bench(int, char**) {
                         for (int t = 0; t < T; t++) {
                             double a = 0;
                             for (int c = 0; c < sub; c++) a += y[(size_t)t * K + gi * sub + c];
-                            worst = std::max(worst, std::fabs(xs[(size_t)gi * T + t] - a));
+                            float g = xs[(size_t)gi * T + t];
+                            uint32_t b;
+                            std::memcpy(&b, &g, 4);
+                            const int e = (int8_t)(b & 0xff);
+                            b &= ~0xffu;
+                            std::memcpy(&g, &b, 4);
+                            worst = std::max(worst, std::fabs(g - a) - std::fabs(a) * 0x1p-15);
+                            // the exponent: the 32 columns' max |x| over 2^e in [8, 16)
+                            float m = 0;
+                            for (int c = 0; c < 32; c++) m = std::max(m, std::fabs(y[(size_t)t * K + (gi * sub & ~31) + c]));
+                            if (m > 0 && !(std::ldexp(m, -e) >= 8 && std::ldexp(m, -e) < 16)) worst = 1;
+                            if (sub == 32) e32[(size_t)gi * T + t] = e;
                         }
                 }
-                const uint16_t* h = (const uint16_t*)xh.cpu;
+                const uint16_t* h = (const uint16_t*)xh.cpu;   // x 2^-e (the 32 columns' e)
                 for (int c = 0; c < K; c++)
                     for (int t = 0; t < T; t++) {
                         const float v = y[(size_t)t * K + c];
-                        worst = std::max(worst, (double)std::fabs(fp16_to_fp32(h[(size_t)c * T + t]) - v) / (std::fabs(v) + 1e-3) * 1e-2);
+                        const float g = std::ldexp(fp16_to_fp32(h[(size_t)c * T + t]), e32[(size_t)(c / 32) * T + t]);
+                        worst = std::max(worst, (double)std::fabs(g - v) / (std::fabs(v) + 1e-3) * 1e-2);
                     }
                 std::printf("to_xT K %d: worst error %.3g %s\n", K, worst, worst < 1e-4 ? "ok" : "WRONG");
                 if (!(worst < 1e-4)) ok = false;
@@ -287,6 +317,68 @@ int cmd_xt_bench(int, char**) {
     }
     std::printf("xt-bench: %s\n", ok ? "to_xT matches the CPU" : "to_xT WRONG");
     return ok ? 0 : 1;
+}
+
+}  // namespace ts5::direct
+
+namespace ts5::direct {
+
+// dot-test i8|u8|f16: does gfx1013 run a dot-product instruction? LLVM
+// (AMD's compiler) has v_dot4_i32_i8, v_dot4_u32_u8 and v_dot2_f32_f16 on
+// gfx1011/gfx1012 but not gfx1013 (the PS5) and refuses them there; this
+// runs one anyway. Our assembler writes v_pk_fma_f16 (the same VOP3P form),
+// then its opcode is patched to the dot one. A lane's result: 170 (i8, u8:
+// 1 5 + 2 6 + 3 7 + 4 8 + 100) or 170.0 (f16: 1.5 2 + 2 3.5 + 160 ... see
+// below). If the GPU doesn't decode it the wave faults or halts and the
+// wait times out (run it last).
+int cmd_dot_test(int argc, char** argv) {
+    const std::string kind = argc > 2 ? argv[2] : "i8";
+    const int op = kind == "u8" ? 0x17 : kind == "f16" ? 0x13 : 0x16;
+    kfd::Device dev;
+    if (!dev.open() || !dev.create_queue(1 << 20)) { std::fprintf(stderr, "dot-test: %s\n", dev.err().c_str()); return 1; }
+    const bool f16 = kind == "f16";
+    // f16: (1.5, 2.0) . (2.0, 3.5) + 160.0 = 3 + 7 + 160 = 170
+    const uint32_t a = f16 ? 0x40003e00u : 0x04030201u, b = f16 ? 0x43004000u : 0x08070605u, c = f16 ? 0x43200000u : 100u;
+    std::string src = ".kernel dot_test\n.wave32\n.user_sgprs 2\n";
+    src += "    v_mov_b32 v2, " + std::to_string(a) + "\n    v_mov_b32 v3, " + std::to_string(b) + "\n    v_mov_b32 v4, " + std::to_string(c) + "\n";
+    src += "    v_pk_fma_f16 v1, v2, v3, v4\n";
+    src += "    v_lshlrev_b32 v5, 2, v0\n    global_store_dword v5, v1, s[0:1]\n    s_endpgm\n";
+    gfx10::Kernel k;
+    std::string err;
+    if (!gfx10::assemble(src, k, &err)) { std::fprintf(stderr, "dot-test: %s\n", err.c_str()); return 1; }
+    size_t at = k.code.size();
+    for (size_t i = 0; i + 1 < k.code.size(); i++)
+        if ((k.code[i] & 0xff7f0000u) == 0xcc0e0000u && (k.code[i] & 0xff) == 1) { at = i; break; }   // v_pk_fma_f16 v1
+    if (at == k.code.size()) { std::fprintf(stderr, "dot-test: v_pk_fma_f16 not found\n"); return 1; }
+    k.code[at] = (k.code[at] & ~(0x7fu << 16)) | ((uint32_t)op << 16);
+    std::printf("dot-test %s: instruction %08x %08x\n", kind.c_str(), k.code[at], k.code[at + 1]);
+    std::fflush(stdout);
+    kfd::Buffer code, out, ts;
+    if (!dev.alloc(65536, kfd::Mem::Gtt, code) || !dev.alloc(4096, kfd::Mem::Gtt, out)) { std::fprintf(stderr, "dot-test: %s\n", dev.err().c_str()); return 1; }
+    for (size_t i = 0; i < 65536 / 4; i++) ((uint32_t*)code.cpu)[i] = 0xbf9f0000;
+    std::memcpy(code.cpu, k.code.data(), k.code.size() * 4);
+    std::memset(out.cpu, 0xee, 4096);
+    uint64_t* sig = (uint64_t*)dev.signals.cpu;
+    sig[0] = 0;
+    const uint32_t args[2] = {(uint32_t)out.gpu, (uint32_t)(out.gpu >> 32)};
+    const uint32_t g[3] = {1, 1, 1}, th[3] = {32, 1, 1};
+    pm4::Stream s;
+    s.acquire_all();
+    s.dispatch(k, code.gpu, args, 2, g, th);
+    s.release(dev.signals.gpu, 1);
+    if (!dev.submit(s.w) || !dev.wait((volatile uint64_t*)sig, 1, 5000)) {
+        std::printf("dot-test %s: the GPU did not finish (5 s): it does not run this instruction\n", kind.c_str());
+        return 2;
+    }
+    const uint32_t r = ((const uint32_t*)out.cpu)[0];
+    float rf;
+    std::memcpy(&rf, &r, 4);
+    bool same = true;
+    for (int i = 1; i < 32; i++) same = same && ((const uint32_t*)out.cpu)[i] == r;
+    const bool ok = f16 ? rf == 170.0f : r == 170u;
+    std::printf("dot-test %s: lane 0 = %08x (%s %g), all lanes %s: %s\n", kind.c_str(), r, f16 ? "f32" : "int", f16 ? (double)rf : (double)(int32_t)r,
+                same ? "the same" : "DIFFER", ok ? "RUNS, right answer" : "ran, WRONG answer (not a dot product)");
+    return ok ? 0 : 3;
 }
 
 }  // namespace ts5::direct

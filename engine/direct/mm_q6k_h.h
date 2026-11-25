@@ -1,7 +1,9 @@
 // mm_q6k_h: mm_q6k_sb with packed f16 multiply-adds and x16 input, as
 // mm_q4k_h.h (round 52: 1.5-2x faster than f32 on Q4_K). Each group's 16
 // products are summed in f16, then into f32 with its scale and the -32
-// offset (xs16, f32). The layout below is mm_q6k_sb's.
+// offset (xs16, f32). x16 is scaled by 2^-E per 32 columns and token so
+// that |x| < 16 (round 53: unscaled, Qwen3's activations overflowed f16's
+// 65504 and gave NaN); E is xs16's low byte (to_xT), undone exactly here. The layout below is mm_q6k_sb's.
 //
 // mm_q6k_sb: the Q6_K prompt kernel with each block split across the
 // workgroup's 4 waves, as mm_q4k_sb.h (round 49: sharing the x lines made
@@ -168,6 +170,8 @@ inline std::string gen_mm_q6k_h(int K, int T) {
                     } else {
                         o("v_cvt_f32_f16 " + f + ", v" + S(TMP + p));
                     }
+                    o("s_sext_i32_i8 s17, s" + S(SXS + t));   // x16's scale exponent (to_xT)
+                    o("v_ldexp_f32 " + f + ", " + f + ", s17");
                     o("v_fmac_f32 " + f + ", s" + S(SXS + t) + ", v" + S(M32));
                     o("v_fmac_f32 v" + S(ACC + t) + ", v" + S(DSC + qq) + ", " + f);
                 }
