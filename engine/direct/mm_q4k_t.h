@@ -17,8 +17,7 @@
 // Arguments: s[0:1] W, s[2:3] x16 (K x TT f16, a column's TT tokens
 // together), s[4:5] y (TT x R f32; with SK, SK of them R TT floats apart,
 // to be summed), s6 R, s7 TT (tokens in the pass, a multiple of 128), s[8:9]
-// xs: Q4_K xs32 (K/32 x TT, the sub-block sums, E in the low byte), Q6_K
-// xs16 (K/16 x TT, only E used). Grid: R/128 x TT/128 x SK workgroups of 256.
+// xs32 (K/32 x TT, the sub-block sums, E in the low byte; Q6_K only uses E). Grid: R/128 x TT/128 x SK workgroups of 256.
 #pragma once
 #include <functional>
 #include <string>
@@ -80,7 +79,7 @@ inline std::string gen_mm_t(int K, bool q6, int SK = 1) {
     o("v_lshl_add_u32 v4, v8, 5, v4");
     o("v_lshlrev_b32 v5, 2, v0");
     o("s_lshl_b32 s29, s7, 6");                             // x16 bytes a sub-block: 32 columns
-    o("s_lshl_b32 s30, s7, " + S(q6 ? 3 : 2));             // xs bytes a sub-block
+    o("s_lshl_b32 s30, s7, 2");                             // xs32 bytes a sub-block
     o("s_mul_i32 s25, s12, " + S(NBK / SK * BB));
     o("s_add_u32 s14, s0, s25");
     o("s_addc_u32 s15, s1, 0");

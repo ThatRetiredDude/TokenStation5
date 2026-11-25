@@ -5,6 +5,7 @@
 // "direct" backend.
 #pragma once
 #include <cstdint>
+#include <algorithm>
 #include <map>
 #include <string>
 #include <vector>
@@ -50,8 +51,17 @@ public:
     // `logits` (a prompt's earlier batches skip the output matrix: round 62's
     // profile, 0.083 of 1.60 ms a token). Returns at once.
     static constexpr int kBatch = 16;
+    // Big passes (round 79): 128-512 tokens (a multiple of 128) at once with
+    // the tiled kernels (mm_q4k_t.h), when big_ok(); send_batch takes them too.
+    static constexpr int kBig = 512;
     bool send_batch(const int32_t* ids, int nt, int pos0, bool logits = true);
     bool batch_ok() const { return batch_ok_; }
+    bool big_ok() const { return big_ok_; }
+    // How many of `left` prompt tokens the next send_batch should take.
+    int prompt_chunk(int left) const {
+        if (big_ok_ && left >= 128) return std::min(kBig, left / 128 * 128);
+        return std::min(kBatch, left);
+    }
     // Waits until every token sent so far is done.
     bool wait_all(int timeout_ms = 60000);
     uint64_t sent() const { return seq_; }
@@ -81,7 +91,10 @@ private:
     void build(int32_t id, int pos, uint64_t seq, pm4::Stream& s);
     Prog* mm_prog(const Weight& w);
     Prog* xt_prog(int K);
+    Prog* mt_prog(const Weight& w, int sk);
+    Prog* xtb_prog(int K);
     bool init_batch(std::string& err);
+    bool init_big(std::string& err);
 
     kfd::Device dev_;
     Model* m_ = nullptr;
@@ -91,7 +104,11 @@ private:
     uint64_t seq_ = 0;
     int nstamps_ = 0;
     std::map<uint64_t, Prog> mvs_, mms_, xts_;
-    bool batch_ok_ = false;
+    bool batch_ok_ = false, big_ok_ = false;
+    std::map<uint64_t, Prog> mts_;
+    std::map<int, Prog> xtbs_;
+    Prog k_qkb_, k_attnb_, k_redb_, k_sum_;
+    kfd::Buffer pP_;   // the tiled kernels' SK partial sums
     size_t part_bytes_ = 0;
     kfd::Buffer pX_, pXN_, pT_, pQ_, pK_, pV_, pA_, pG_, pU_, pH_, pxT_, px16_, pxs32_, pxs16_, ppart_;
     Prog k_norm_, k_addnorm_, k_qk_, k_silu_, k_attn_, k_attn2_, k_red_, k_argmax_, k_embed_;

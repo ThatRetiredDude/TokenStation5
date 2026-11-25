@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 
 namespace ts5::direct {
 
@@ -83,11 +84,22 @@ inline std::string gen_rmsnorm(int n, float eps, bool add = false) {
 // Arguments: s[0:1] q, s[2:3] k, s[4:5] v, s[6:7] q_norm, s[8:9] k_norm,
 // s[10:11] cos[64] then sin[64], s[12:13] K cache row for this position,
 // s[14:15] V cache row; s16 workgroup id.
-inline std::string gen_qk_post(int nq, float eps) {
+// nkv > 0: batched over prompt tokens, token tgid_y (s17): every pointer
+// steps one token (q nq 512, k and v nkv 512 bytes, cos/sin 512, the cache
+// rows nkv 256), so one launch takes a whole pass (round 79's big passes).
+inline std::string gen_qk_post(int nq, float eps, int nkv = 0) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
-    k += ".kernel qk_post\n.wave32\n.user_sgprs 16\n.tgid_x\n.lds 64\n";
+    k += ".kernel qk_post\n.wave32\n.user_sgprs 16\n.tgid_x\n" + std::string(nkv ? ".tgid_y\n" : "") + ".lds 64\n";
+    if (nkv) {
+        const std::pair<int, int> step[] = {{0, nq * 512}, {2, nkv * 512}, {4, nkv * 512}, {10, 512}, {12, nkv * 256}, {14, nkv * 256}};
+        for (auto& st : step) {
+            o("s_mul_i32 s20, s17, " + S(st.second));
+            o("s_add_u32 s" + S(st.first) + ", s" + S(st.first) + ", s20");
+            o("s_addc_u32 s" + S(st.first + 1) + ", s" + S(st.first + 1) + ", 0");
+        }
+    }
     o("s_cmp_lt_u32 s16, " + S(nq));
     o("s_cselect_b32 s20, s0, s2");                 // the head's vector
     o("s_cselect_b32 s21, s1, s3");

@@ -235,7 +235,29 @@ inline std::string gen_attn_part() {
 // VGPRs: v4.. scores (QR), sums (QR), V sums (2 QR), v48-111 K then V and p,
 // v112-119 temporaries. SGPRs: q in s[20:83] (two sets of QR x 4 dims),
 // maxima s[90 ..), scales s[90 + QR ..).
-inline std::string gen_attn_part2(int NQT) {
+// The batched kernels' split of a pair's attention, as the runner's:
+// nch = (nl + 255) / 256 chunks, per = (nch + 9) / 10 of them a split,
+// splits = ceil(nch / per). nl, per, splits: SGPR names; t: a scratch SGPR.
+inline std::string attn_split_code(const std::string& nl, const std::string& per256, const std::string& splits, const std::string& t, const std::string& sfx) {
+    std::string k;
+    auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
+    o("s_add_u32 " + t + ", " + nl + ", 255");
+    o("s_lshr_b32 " + t + ", " + t + ", 8");               // nch
+    o("s_add_u32 " + per256 + ", " + t + ", 9");
+    o("s_mul_hi_u32 " + per256 + ", " + per256 + ", 0xcccccccd");
+    o("s_lshr_b32 " + per256 + ", " + per256 + ", 3");     // per
+    o("s_mov_b32 " + splits + ", 0");
+    o("s_mov_b32 vcc_hi, 0");
+    k += "split" + sfx + ":\n";
+    o("s_add_u32 " + splits + ", " + splits + ", 1");
+    o("s_add_u32 vcc_hi, vcc_hi, " + per256);
+    o("s_cmp_lt_u32 vcc_hi, " + t);
+    o("s_cbranch_scc1 split" + sfx);
+    o("s_lshl_b32 " + per256 + ", " + per256 + ", 8");
+    return k;
+}
+
+inline std::string gen_attn_part2(int NQT, bool batched = false) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
@@ -246,7 +268,29 @@ inline std::string gen_attn_part2(int NQT) {
     const int DP = MISC, PG = MISC + 1, DP4 = MISC + 2, PG32 = MISC + 3, I32 = MISC + 4, VT = MISC + 5, VPOS = MISC + 6, P16 = MISC + 7;
     const int SM = 90, SS = 90 + QR;                     // SGPR maxima, scales
     const int LS = 32 * QR, LP = 64 * QR, LV = LP + 256 * QR * 4;   // LDS: sums, p [pos][row], V partials
-    k += ".kernel attn_part\n.wave32\n.user_sgprs 12\n.tgid_x\n.lds " + S(LV + 256 * 2 * QR * 4) + "\n";
+    k += ".kernel attn_part\n.wave32\n.user_sgprs 12\n.tgid_x\n" + std::string(batched ? ".tgid_y\n" : "") + ".lds " + S(LV + 256 * 2 * QR * 4) + "\n";
+    if (batched) {
+        // a whole pass: tokens NQT p .. of the pass (p: tgid_y, s13); s6 the
+        // pass's first position, the splits and per worked out here
+        if (NQT != 2) return "";
+        o("s_lshl_b32 s14, s13, 1");
+        o("s_add_u32 s6, s6, s14");
+        o("s_add_u32 s6, s6, 1");              // token 0's count
+        o("s_add_u32 s15, s6, 1");             // the pair's last
+        k += attn_split_code("s15", "s10", "s16", "s17", "_p");
+        o("s_lshl_b32 s16, s16, 3");
+        o("s_cmp_ge_u32 s12, s16");
+        o("s_cbranch_scc0 inpair");
+        o("s_endpgm");
+        k += "inpair:\n";
+        o("s_lshl_b32 s14, s13, 15");          // q: 2 tokens x 16 KiB
+        o("s_add_u32 s0, s0, s14");
+        o("s_addc_u32 s1, s1, 0");
+        o("s_mul_i32 s14, s13, s11");
+        o("s_lshl_b32 s14, s14, 1");
+        o("s_add_u32 s8, s8, s14");
+        o("s_addc_u32 s9, s9, 0");
+    }
     o("s_and_b32 s13, s12, 7");            // g
     o("s_lshr_b32 s14, s12, 3");           // split
     o("s_mul_i32 s16, s14, s10");          // first position of the split
@@ -448,11 +492,26 @@ inline std::string gen_attn_part2(int NQT) {
     return k;
 }
 
-inline std::string gen_attn_reduce() {
+// batched: a whole pass, token tgid_y (s11); s5 the pass's first position,
+// s8 bytes of partials a token; the splits worked out as attn_part2's pairs.
+inline std::string gen_attn_reduce(bool batched = false) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
-    k += ".kernel attn_reduce\n.wave32\n.user_sgprs 10\n.tgid_x\n";
+    k += ".kernel attn_reduce\n.wave32\n.user_sgprs 10\n.tgid_x\n" + std::string(batched ? ".tgid_y\n" : "");
+    if (batched) {
+        o("s_lshr_b32 s12, s11, 1");
+        o("s_lshl_b32 s12, s12, 1");
+        o("s_add_u32 s12, s12, s5");
+        o("s_add_u32 s12, s12, 2");            // the pair's last token's count
+        k += attn_split_code("s12", "s13", "s4", "s14", "_r");
+        o("s_mul_i32 s12, s11, s8");
+        o("s_add_u32 s0, s0, s12");
+        o("s_addc_u32 s1, s1, 0");
+        o("s_lshl_b32 s12, s11, 14");          // out: 16 KiB a token
+        o("s_add_u32 s2, s2, s12");
+        o("s_addc_u32 s3, s3, 0");
+    }
     o("v_and_b32 v1, 63, v0");             // dp
     o("v_lshrrev_b32 v2, 6, v0");          // h
     o("s_mul_i32 s11, s10, 2112");         // chunk 0's partials for this KV head

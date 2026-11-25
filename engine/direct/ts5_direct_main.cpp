@@ -1038,14 +1038,18 @@ int main(int argc, char** argv) {
     }
     if (cmd == "gen-attn") {   // prints attn_part, or attn_reduce with "reduce"
         const std::string v = argc > 2 ? argv[2] : "part";   // part2-1 / part2-2: attn_part2 for 1 / 2 tokens
-        std::fputs((v == "reduce" ? ts5::direct::gen_attn_reduce() : v.rfind("part2-", 0) == 0 ? ts5::direct::gen_attn_part2(std::atoi(v.c_str() + 6)) : ts5::direct::gen_attn_part()).c_str(), stdout);
+        std::fputs((v == "reduce" ? ts5::direct::gen_attn_reduce() : v == "reduce-b" ? ts5::direct::gen_attn_reduce(true) : v == "part2-b" ? ts5::direct::gen_attn_part2(2, true) : v.rfind("part2-", 0) == 0 ? ts5::direct::gen_attn_part2(std::atoi(v.c_str() + 6)) : ts5::direct::gen_attn_part()).c_str(), stdout);
         return 0;
     }
     if (cmd == "gen-xt") {   // prints to_xT (prefill.h) for K columns and T tokens
         {
             const int K = argc > 2 ? std::atoi(argv[2]) : 4096, T = argc > 3 ? std::atoi(argv[3]) : 16, NT = argc > 4 ? std::atoi(argv[4]) : 256;
-            std::fputs((NT <= 1 ? ts5::direct::gen_to_xT2(K, T, NT == 1) : ts5::direct::gen_to_xT(K, T, NT)).c_str(), stdout);   // NT 1 / 0: to_xT2 with / without xT
+            std::fputs((NT == 2 ? ts5::direct::gen_to_xT_big(K) + ts5::direct::gen_sum_parts() : NT <= 1 ? ts5::direct::gen_to_xT2(K, T, NT == 1) : ts5::direct::gen_to_xT(K, T, NT)).c_str(), stdout);   // NT 1 / 0: to_xT2 with / without xT
         }
+        return 0;
+    }
+    if (cmd == "gen-ops" && argc > 2 && std::string(argv[2]) == "b") {   // the batched qk_post (big prompt passes)
+        std::fputs(ts5::direct::gen_qk_post(32, 1e-6f, 8).c_str(), stdout);
         return 0;
     }
     if (cmd == "gen-ops") {   // prints rmsnorm, add_rmsnorm, qk_post and silu_mul

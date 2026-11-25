@@ -13,6 +13,7 @@
 #include "mm_q4k_sb.h"
 #include "mm_q6k_sb.h"
 #include "mm_q4k_h.h"
+#include "mm_q4k_t.h"
 #include "mm_q6k_h.h"
 #include "mv_q4k.h"
 #include "mv_q6k.h"
@@ -138,6 +139,77 @@ Runner::Prog* Runner::xt_prog(int K) {
     return &p;
 }
 
+// Big passes: the tiled kernel for a weight and SK (mm_q4k_t.h), and
+// to_xT_big for K columns.
+Runner::Prog* Runner::mt_prog(const Weight& w, int sk) {
+    const uint64_t key = (uint64_t)w.type() << 56 | (uint64_t)sk << 50 | (uint64_t)w.ne1() << 25 | (uint64_t)w.ne0();
+    auto it = mts_.find(key);
+    if (it != mts_.end()) return &it->second;
+    if ((w.type() != GGML_Q4_K && w.type() != GGML_Q6_K) || w.ne0() % 256 || w.ne1() % 128) return nullptr;
+    const std::string src = gen_mm_t((int)w.ne0(), w.type() == GGML_Q6_K, sk);
+    if (src.empty()) return nullptr;
+    Prog& p = mts_[key];
+    std::string e;
+    if (!load(src, p, e)) {
+        std::fprintf(stderr, "direct: tiled prompt kernel: %s\n", e.c_str());
+        mts_.erase(key);
+        return nullptr;
+    }
+    return &p;
+}
+
+Runner::Prog* Runner::xtb_prog(int K) {
+    auto it = xtbs_.find(K);
+    if (it != xtbs_.end()) return &it->second;
+    Prog& p = xtbs_[K];
+    std::string e;
+    if (K % 256 || !load(gen_to_xT_big(K), p, e)) {
+        std::fprintf(stderr, "direct: to_xT_big kernel: %s\n", e.c_str());
+        xtbs_.erase(K);
+        return nullptr;
+    }
+    return &p;
+}
+
+// SK for a weight in a big pass of TT tokens: enough workgroups for about
+// two rounds of the GPU's 80 slots (round 78: few workgroups leave it
+// underfilled; each SK costs a partial sum's write and read).
+static int big_sk(const Weight& w, int TT) {
+    static const int max_sk = std::getenv("TS5_DIRECT_BIG_SK") ? std::atoi(std::getenv("TS5_DIRECT_BIG_SK")) : 16;   // for tests
+    const int wgs = (int)(w.ne1() / 128) * (TT / 128), NB = (int)(w.ne0() / 256);
+    int sk = 1;
+    while (sk < max_sk && wgs * sk < 160 && NB % (2 * sk) == 0) sk *= 2;
+    return sk;
+}
+
+// TS5_DIRECT_BIG=0: prompts only in passes of 16 (the round 66 path).
+static bool big_on() {
+    static const bool on = !(std::getenv("TS5_DIRECT_BIG") && std::atoi(std::getenv("TS5_DIRECT_BIG")) == 0);
+    return on;
+}
+
+bool Runner::init_big(std::string& err) {
+    const HParams& hp = m_->hp;
+    if (!big_on() || NQ_ != 32 || opt.old_mm || opt.f32_mm) return false;
+    for (int l = 0; l < hp.n_layer; l++) {
+        const Layer& L = m_->layers[l];
+        for (const Weight* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down})
+            for (int TT = 128; TT <= kBig; TT += 128)
+                if (!mt_prog(*w, big_sk(*w, TT))) return false;
+    }
+    if (!xtb_prog(E_) || !xtb_prog(NQ_ * HD_) || !xtb_prog(F_)) return false;
+    if (!load(gen_qk_post(NQ_, hp.rms_eps, NKV_), k_qkb_, err) || !load(gen_attn_part2(2, true), k_attnb_, err) ||
+        !load(gen_attn_reduce(true), k_redb_, err) || !load(gen_sum_parts(), k_sum_, err)) {
+        err = "big pass kernels: " + err;
+        return false;
+    }
+    if (!dev_.alloc((size_t)96 << 20, kfd::Mem::Gtt, pP_)) {
+        err = dev_.err() + " (partial sums)";
+        return false;
+    }
+    return true;
+}
+
 // The prompt path's kernels and buffers; without them (a weight the prompt
 // kernels don't take) prompts go a token at a time.
 bool Runner::init_batch(std::string& err) {
@@ -149,7 +221,7 @@ bool Runner::init_batch(std::string& err) {
             if (!mm_prog(*w)) return false;
     }
     if (!xt_prog(E_) || !xt_prog(A) || !xt_prog(F_)) return false;
-    const size_t T = kBatch, KM = (size_t)std::max(std::max(E_, F_), A);
+    const size_t T = big_on() ? kBig : kBatch, KM = (size_t)std::max(std::max(E_, F_), A);
     part_bytes_ = (size_t)10 * NKV_ * 2112;
     for (auto pr : {std::make_pair(&pX_, T * E_ * 4), std::make_pair(&pXN_, T * E_ * 4), std::make_pair(&pT_, T * E_ * 4),
                     std::make_pair(&pQ_, T * A * 4), std::make_pair(&pK_, T * NKV_ * HD_ * 4), std::make_pair(&pV_, T * NKV_ * HD_ * 4),
@@ -197,9 +269,10 @@ std::string Runner::err() const {
 }
 
 bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
-    if (!batch_ok_ || nt < 1 || nt > kBatch || pos0 < 0 || pos0 + nt > ctx_) return false;
+    const bool big = nt > kBatch;   // a big pass: the tiled kernels, nt a multiple of 128
+    if (!batch_ok_ || nt < 1 || (big && (!big_ok_ || nt % 128 || nt > kBig)) || pos0 < 0 || pos0 + nt > ctx_) return false;
     const HParams& hp = m_->hp;
-    const int T = kBatch, A = NQ_ * HD_;
+    const int T = big ? nt : kBatch, A = NQ_ * HD_;
     const uint32_t t256[3] = {256, 1, 1}, t64[3] = {64, 1, 1}, one[3] = {1, 1, 1};
     const uint64_t seq = seq_++;
     pm4::Stream s;
@@ -216,13 +289,54 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
     };
     auto to_xT = [&](uint64_t y, int K) {
         if (opt.skip_xt) return;
+        if (big) {
+            Prog* p = xtb_prog(K);
+            const uint32_t args[8] = {lo(y), hi(y), lo(px16_.gpu), hi(px16_.gpu), lo(pxs32_.gpu), hi(pxs32_.gpu), (uint32_t)nt, 0};
+            const uint32_t g[3] = {(uint32_t)(K / 32), 1, 1};
+            s.dispatch(p->k, p->code.gpu, args, 8, g, t256);
+            return;
+        }
         Prog* p = xt_prog(K);
         const uint32_t args[10] = {lo(y),           hi(y),           lo(pxT_.gpu),   hi(pxT_.gpu),   lo(pxs32_.gpu),
                                    hi(pxs32_.gpu), lo(pxs16_.gpu), hi(pxs16_.gpu), lo(px16_.gpu), hi(px16_.gpu)};
         const uint32_t g[3] = {(uint32_t)(xt2() ? K / 256 : K / (4 * xt_nt() / kBatch)), 1, 1}, th[3] = {(uint32_t)(xt2() ? 256 : xt_nt()), 1, 1};
         s.dispatch(p->k, p->code.gpu, args, 10, g, th);
     };
+    // Big passes: SK partial sums go to pP_, summed into y by sums() after
+    // the next barrier.
+    struct Pending { uint64_t part, y; uint32_t n, sk; };
+    std::vector<Pending> pend;
+    size_t poff = 0;
+    bool pfull = false;
+    auto sums = [&]() {
+        if (pend.empty()) return;
+        for (const Pending& pd : pend) {
+            const uint32_t args[8] = {lo(pd.part), hi(pd.part), lo(pd.y), hi(pd.y), pd.sk, pd.n * 4, 0, 0};
+            const uint32_t g[3] = {pd.n / 1024, 1, 1};
+            s.dispatch(k_sum_.k, k_sum_.code.gpu, args, 8, g, t256);
+        }
+        pend.clear();
+        poff = 0;
+        barrier();
+    };
     auto mm = [&](const Weight& w, uint64_t y) {
+        if (big) {
+            const int sk = big_sk(w, nt);
+            Prog* p = mt_prog(w, sk);
+            const uint32_t R = (uint32_t)w.ne1(), n = R * (uint32_t)nt;
+            uint64_t dst = y;
+            if (sk > 1) {
+                if (poff + (size_t)sk * n * 4 > pP_.size) { pfull = true; return; }
+                dst = pP_.gpu + poff;
+                pend.push_back({dst, y, n, (uint32_t)sk});
+                poff += (size_t)sk * n * 4;
+            }
+            const uint64_t a = addr(w.data);
+            const uint32_t args[10] = {lo(a), hi(a), lo(px16_.gpu), hi(px16_.gpu), lo(dst), hi(dst), R, (uint32_t)nt, lo(pxs32_.gpu), hi(pxs32_.gpu)};
+            const uint32_t g[3] = {R / 128, (uint32_t)nt / 128, (uint32_t)sk};
+            s.dispatch(p->k, p->code.gpu, args, 10, g, t256);
+            return;
+        }
         Prog* p = mm_prog(w);
         const uint64_t a = addr(w.data), xs = w.type() == GGML_Q6_K ? pxs16_.gpu : pxs32_.gpu;
         const uint64_t x = opt.old_mm || opt.f32_mm ? pxT_.gpu : px16_.gpu;
@@ -271,8 +385,17 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
         mm(L.wk, pK_.gpu);
         mm(L.wv, pV_.gpu);
         barrier();
+        sums();
         stamp(S_QKV);
-        for (int t = 0; t < nt; t++) {
+        if (big) {   // every token in one launch
+            const uint64_t qn = addr(L.q_norm.data), kn = addr(L.k_norm.data), rr = brope_.gpu + (size_t)pos0 * 512;
+            const uint64_t kr = kc + (size_t)pos0 * NKV_ * HD_ * 2, vr = vc + (size_t)pos0 * NKV_ * HD_ * 2;
+            const uint32_t args[16] = {lo(pQ_.gpu), hi(pQ_.gpu), lo(pK_.gpu), hi(pK_.gpu), lo(pV_.gpu), hi(pV_.gpu), lo(qn), hi(qn),
+                                       lo(kn),      hi(kn),      lo(rr),      hi(rr),      lo(kr),      hi(kr),      lo(vr), hi(vr)};
+            const uint32_t g[3] = {(uint32_t)(NQ_ + NKV_), (uint32_t)nt, 1};
+            s.dispatch(k_qkb_.k, k_qkb_.code.gpu, args, 16, g, t64);
+        }
+        for (int t = 0; t < nt && !big; t++) {
             const int pos = pos0 + t;
             const uint64_t q = pQ_.gpu + (size_t)t * A * 4, k = pK_.gpu + (size_t)t * NKV_ * HD_ * 4, v = pV_.gpu + (size_t)t * NKV_ * HD_ * 4;
             const uint64_t qn = addr(L.q_norm.data), kn = addr(L.k_norm.data), rr = brope_.gpu + (size_t)pos * 512;
@@ -284,10 +407,21 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
         }
         barrier();
         stamp(S_QK);
+        if (big) {   // token pairs, one launch; each pair's splits worked out on the GPU
+            const uint32_t nl = pos0 + nt, nch = (nl + 255) / 256, per = (nch + 9) / 10, smax = (nch + per - 1) / per;
+            const uint32_t a1[12] = {lo(pQ_.gpu), hi(pQ_.gpu), lo(kc), hi(kc), lo(vc), hi(vc), (uint32_t)pos0, scale_bits_,
+                                     lo(ppart_.gpu), hi(ppart_.gpu), 0, (uint32_t)part_bytes_};
+            const uint32_t g1[3] = {smax * NKV_, (uint32_t)nt / 2, 1};
+            s.dispatch(k_attnb_.k, k_attnb_.code.gpu, a1, 12, g1, t256);
+            barrier();
+            const uint32_t a2[10] = {lo(ppart_.gpu), hi(ppart_.gpu), lo(pA_.gpu), hi(pA_.gpu), 0, (uint32_t)pos0, 0, 0, (uint32_t)part_bytes_, 0};
+            const uint32_t g2[3] = {(uint32_t)NKV_, (uint32_t)nt, 1};
+            s.dispatch(k_redb_.k, k_redb_.code.gpu, a2, 10, g2, t256);
+        }
         uint32_t splits[kBatch];
         // Round 76: attn_part2 reads K/V once for 2 prompt tokens (1.8-3.8x the
         // old kernel a token at a time); a pair splits by its later token.
-        for (int t = 0; t < nt;) {
+        for (int t = 0; t < nt && !big;) {
             const int G = attn2() && NQ_ == 32 && t + 1 < nt ? 2 : 1;   // part2 steps q 16 KiB a token
             const uint32_t n = pos0 + t + 1, nl = n + G - 1, nch = (nl + 255) / 256, per = (nch + 9) / 10;
             for (int u = t; u < t + G; u++) splits[u] = (nch + per - 1) / per;
@@ -298,8 +432,8 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
             s.dispatch(k.k, k.code.gpu, a1, 12, g1, t256);
             t += G;
         }
-        barrier();
-        for (int t = 0; t < nt; t++) {
+        if (!big) barrier();
+        for (int t = 0; t < nt && !big; t++) {
             const uint64_t part = ppart_.gpu + t * part_bytes_, out = pA_.gpu + (size_t)t * A * 4;
             const uint32_t a2[10] = {lo(part), hi(part), lo(out), hi(out), splits[t], 0, 0, 0, 0, 0};
             const uint32_t g2[3] = {(uint32_t)NKV_, 1, 1};
@@ -312,6 +446,7 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
         stamp(S_XT);
         mm(L.wo, pT_.gpu);
         barrier();
+        sums();
         stamp(S_WO);
         norm(true, L.ffn_norm, 0, nt, pXN_.gpu);
         barrier();
@@ -322,6 +457,7 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
         mm(L.w_gate, pG_.gpu);
         mm(L.w_up, pU_.gpu);
         barrier();
+        sums();
         stamp(S_GATEUP);
         {
             const uint32_t args[6] = {lo(pG_.gpu), hi(pG_.gpu), lo(pU_.gpu), hi(pU_.gpu), lo(pH_.gpu), hi(pH_.gpu)};
@@ -334,8 +470,10 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
         barrier();
         stamp(S_XT);
         mm(L.w_down, pT_.gpu);
-        if (opt.profile) barrier();
+        if (opt.profile || !pend.empty()) barrier();
+        sums();
         stamp(S_DOWN);
+        if (pfull) return false;
         if (!flush()) return false;
     }
     // The last token's logits and argmax, as a single token's.
@@ -480,6 +618,7 @@ bool Runner::init(Model& m, int n_ctx, std::string& err) {
     {
         std::string e;
         batch_ok_ = !opt.fused && init_batch(e);
+        big_ok_ = batch_ok_ && init_big(e);
         if (!batch_ok_ && !e.empty()) std::fprintf(stderr, "direct: prompts a token at a time (%s)\n", e.c_str());
     }
     return true;

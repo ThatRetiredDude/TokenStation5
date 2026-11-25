@@ -248,4 +248,168 @@ inline std::string gen_to_xT2(int K, int T, bool WXT = true) {
     return k;
 }
 
+// to_xT_big: a big pass's x16 and xs32 (round 79: prompt passes of 128-512
+// tokens for the tiled kernels, mm_q4k_t.h). Y is TT x K f32 (a token's row
+// together); x16 is K x TT f16 (a column's TT tokens together), x 2^-E with
+// one E for each 32 columns over all TT tokens (so |x16| < 16, as to_xT);
+// xs32 is K/32 x TT: each token's sum of the 32 (f32, E in its low byte).
+// A workgroup of 256 takes one 32-column chunk: first the max over every
+// token, then 64 tokens at a time (thread: token t / 4, columns 8 (t % 4) ..),
+// through LDS to whole 128-byte runs of x16.
+// Arguments: s[0:1] Y, s[2:3] x16, s[4:5] xs32, s6 TT (a multiple of 64);
+// s8 workgroup id (the chunk). Grid: K / 32 workgroups of 256.
+inline std::string gen_to_xT_big(int K) {
+    auto S = [](long v) { return std::to_string(v); };
+    std::string k;
+    auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
+    k += ".kernel to_xT_big\n.wave32\n.user_sgprs 8\n.tgid_x\n.lds 4160\n";
+    o("v_lshrrev_b32 v1, 2, v0");                        // token in the block
+    o("v_and_b32 v2, 3, v0");                            // columns 8 q ..
+    o("v_mul_u32_u24 v3, " + S(K * 4) + ", v1");
+    o("v_lshl_add_u32 v3, v2, 5, v3");
+    o("s_lshl_b32 s9, s8, 7");
+    o("v_add_nc_u32 v3, s9, v3");                        // Y offset
+    o("s_lshr_b32 s10, s6, 6");                          // blocks of 64 tokens
+    o("v_cmp_eq_u32 vcc_lo, 0, v0");
+    o("s_and_saveexec_b32 s20, vcc_lo");
+    o("v_mov_b32 v4, 0");
+    o("ds_write_b32 v4, v4 offset:4096");
+    o("s_mov_b32 exec_lo, s20");
+    o("v_mov_b32 v20, 0");
+    o("s_mov_b32 s12, s0");
+    o("s_mov_b32 s13, s1");
+    o("s_mov_b32 s11, 0");
+    k += "maxloop:\n";
+    o("global_load_dwordx4 v[10:13], v3, s[12:13]");
+    o("global_load_dwordx4 v[14:17], v3, s[12:13] offset:16");
+    o("s_waitcnt vmcnt(0)");
+    o("v_max3_f32 v20, |v10|, |v11|, v20");
+    o("v_max3_f32 v20, |v12|, |v13|, v20");
+    o("v_max3_f32 v20, |v14|, |v15|, v20");
+    o("v_max3_f32 v20, |v16|, |v17|, v20");
+    o("s_add_u32 s12, s12, " + S(64 * K * 4));
+    o("s_addc_u32 s13, s13, 0");
+    o("s_add_u32 s11, s11, 1");
+    o("s_cmp_lt_u32 s11, s10");
+    o("s_cbranch_scc1 maxloop");
+    o("v_nop");
+    o("v_nop");
+    for (int m : {1, 2, 4, 8}) o("v_max_f32_dpp v20, v20, v20 row_xmask:" + S(m) + " row_mask:0xf bank_mask:0xf");
+    o("s_mov_b32 s14, 0x76543210");
+    o("s_mov_b32 s15, 0xfedcba98");
+    o("v_permlanex16_b32 v21, v20, s14, s15");
+    o("v_max_f32 v20, v20, v21");
+    o("s_waitcnt lgkmcnt(0)");
+    o("s_barrier");                                      // (the max slot zeroed)
+    o("v_mov_b32 v4, 0");
+    o("ds_max_u32 v4, v20 offset:4096");
+    o("s_waitcnt lgkmcnt(0)");
+    o("s_barrier");
+    o("ds_read_b32 v20, v4 offset:4096");
+    o("s_waitcnt lgkmcnt(0)");
+    o("v_lshrrev_b32 v21, 23, v20");
+    o("v_add_nc_u32 v21, 0xffffff7e, v21");              // E = biased exponent - 130
+    o("v_max_i32 v21, 0xffffff9c, v21");                 // at least -100
+    o("v_readfirstlane_b32 s16, v21");
+    o("s_sub_u32 s17, 0, s16");                          // -E
+    o("s_and_b32 s16, s16, 0xff");                       // E's byte
+    // pass 2: 64 tokens at a time
+    o("s_mov_b32 s12, s0");
+    o("s_mov_b32 s13, s1");
+    o("s_mov_b32 s11, 0");
+    o("s_lshl_b32 s9, s6, 1");                           // x16 bytes a column
+    o("s_mul_i32 s18, s8, 32");
+    o("s_mul_i32 s18, s18, s9");
+    o("s_add_u32 s14, s2, s18");
+    o("s_addc_u32 s15, s3, 0");                          // the chunk's first column
+    o("s_mul_i32 s18, s8, s6");
+    o("s_lshl_b32 s18, s18, 2");
+    o("s_add_u32 s18, s4, s18");
+    o("s_addc_u32 s19, s5, 0");                          // the chunk's sums
+    o("v_lshlrev_b32 v4, 10, v2");
+    o("v_lshl_add_u32 v4, v1, 1, v4");                   // LDS [column][token]: 128 (8 q) + 2 t
+    o("v_lshlrev_b32 v5, 4, v0");                        // read back: column v0 / 8, tokens 8 (v0 % 8) ..
+    o("v_lshrrev_b32 v6, 3, v0");
+    o("v_mul_lo_u32 v6, s9, v6");
+    o("v_and_b32 v7, 7, v0");
+    o("v_lshl_add_u32 v6, v7, 4, v6");                   // x16 offset
+    o("v_lshlrev_b32 v7, 2, v1");                        // xs32 offset
+    k += "block:\n";
+    o("global_load_dwordx4 v[10:13], v3, s[12:13]");
+    o("global_load_dwordx4 v[14:17], v3, s[12:13] offset:16");
+    o("s_waitcnt vmcnt(0)");
+    o("v_add_f32 v21, v10, v11");
+    o("v_add_f32 v22, v12, v13");
+    o("v_add_f32 v23, v14, v15");
+    o("v_add_f32 v24, v16, v17");
+    o("v_add_f32 v21, v21, v22");
+    o("v_add_f32 v23, v23, v24");
+    o("v_add_f32 v21, v21, v23");
+    o("v_nop");
+    o("v_nop");
+    o("v_add_f32_dpp v21, v21, v21 row_xmask:1 row_mask:0xf bank_mask:0xf");
+    o("v_nop");
+    o("v_nop");
+    o("v_add_f32_dpp v21, v21, v21 row_xmask:2 row_mask:0xf bank_mask:0xf");
+    o("v_and_b32 v21, 0xffffff00, v21");
+    o("v_or_b32 v21, s16, v21");
+    o("v_cmp_eq_u32 vcc_lo, 0, v2");                     // q == 0: the sum's lane
+    o("s_and_saveexec_b32 s20, vcc_lo");
+    o("global_store_dword v7, v21, s[18:19]");
+    o("s_mov_b32 exec_lo, s20");
+    for (int i = 0; i < 8; i++) {
+        o("v_ldexp_f32 v" + S(10 + i) + ", v" + S(10 + i) + ", s17");
+        o("v_cvt_f16_f32 v" + S(10 + i) + ", v" + S(10 + i));
+        o("ds_write_b16 v4, v" + S(10 + i) + " offset:" + S(128 * i));
+    }
+    o("s_waitcnt lgkmcnt(0)");
+    o("s_barrier");
+    o("ds_read_b128 v[24:27], v5");
+    o("s_waitcnt lgkmcnt(0)");
+    o("global_store_dwordx4 v6, v[24:27], s[14:15]");
+    o("s_barrier");
+    o("s_add_u32 s12, s12, " + S(64 * K * 4));
+    o("s_addc_u32 s13, s13, 0");
+    o("s_add_u32 s14, s14, 128");
+    o("s_addc_u32 s15, s15, 0");
+    o("s_add_u32 s18, s18, 256");
+    o("s_addc_u32 s19, s19, 0");
+    o("s_add_u32 s11, s11, 1");
+    o("s_cmp_lt_u32 s11, s10");
+    o("s_cbranch_scc1 block");
+    o("s_endpgm");
+    return k;
+}
+
+// out = the sum of SK partials (the tiled kernels' split along K), n floats
+// each, `stride` bytes apart: 256 threads x 4 floats a workgroup.
+// Arguments: s[0:1] partials, s[2:3] out, s4 SK, s5 stride; s8 workgroup id.
+// Grid: n / 1024 workgroups.
+inline std::string gen_sum_parts() {
+    std::string k = ".kernel sum_parts\n.wave32\n.user_sgprs 8\n.tgid_x\n";
+    auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
+    o("s_lshl_b32 s9, s8, 12");
+    o("v_lshlrev_b32 v1, 4, v0");
+    o("v_add_nc_u32 v1, s9, v1");
+    o("global_load_dwordx4 v[4:7], v1, s[0:1]");
+    o("s_mov_b32 s10, 1");
+    o("s_mov_b32 s12, s0");
+    o("s_mov_b32 s13, s1");
+    k += "part:\n";
+    o("s_cmp_ge_u32 s10, s4");
+    o("s_cbranch_scc1 sum_done");
+    o("s_add_u32 s12, s12, s5");
+    o("s_addc_u32 s13, s13, 0");
+    o("global_load_dwordx4 v[8:11], v1, s[12:13]");
+    o("s_waitcnt vmcnt(0)");
+    for (int i = 0; i < 4; i++) o("v_add_f32 v" + std::to_string(4 + i) + ", v" + std::to_string(4 + i) + ", v" + std::to_string(8 + i));
+    o("s_add_u32 s10, s10, 1");
+    o("s_branch part");
+    k += "sum_done:\n";
+    o("s_waitcnt vmcnt(0)");
+    o("global_store_dwordx4 v1, v[4:7], s[2:3]");
+    o("s_endpgm");
+    return k;
+}
+
 }  // namespace ts5::direct

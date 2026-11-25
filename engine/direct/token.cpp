@@ -204,14 +204,48 @@ int cmd_token(int argc, char** argv) {
         if (!bok) ok = false;
         std::printf("prompt batches: %d tokens, last token's top-1 gpu %s %d, cpu %s %d, max |diff| %.4f of max |logit| %.3f, GPU argmax %d: %s\n",
                     np, piece(gtop).c_str(), gtop, piece(ctop).c_str(), ctop, md, ml, R.picked(), bok ? "MATCH" : "MISMATCH");
+        // Big passes (round 79): 384 tokens as passes of 256 then 128 (two
+        // token tiles, then a pass at position 256), the last token's logits
+        // against the CPU's.
+        if (R.big_ok() && 384 <= ctx) {
+            std::vector<int32_t> p3(384);
+            for (int i = 0; i < 384; i++) p3[i] = p2[(i * 7) % np];
+            std::vector<float> cpu3(V);
+            std::unique_ptr<Backend> cpu3b(make_cpu_backend(m, ctx, KvType::F16));
+            if (!cpu3b->forward(p3.data(), 384, 0, cpu3.data(), false, err)) return fail("cpu: " + err);
+            if (!R.send_batch(p3.data(), 256, 0, false) || !R.send_batch(p3.data() + 256, 128, 256, true) || !R.wait_all(60000))
+                return fail(R.err() + " (big passes)");
+            double md3 = 0, ml3 = 0;
+            int gt = 0, ct = 0;
+            bool nan3 = false;
+            for (int i = 0; i < V; i++) {
+                if (!(gl[i] == gl[i])) nan3 = true;
+                md3 = std::max(md3, (double)std::fabs(gl[i] - cpu3[i]));
+                ml3 = std::max(ml3, (double)std::fabs(cpu3[i]));
+                if (gl[i] > gl[gt]) gt = i;
+                if (cpu3[i] > cpu3[ct]) ct = i;
+            }
+            const bool ok3 = !nan3 && gt == ct && md3 < 0.05 * ml3 && R.picked() == gt;
+            if (!ok3) ok = false;
+            std::printf("big passes (256 + 128 tokens): last token's top-1 gpu %s %d, cpu %s %d, max |diff| %.4f of max |logit| %.3f, GPU argmax %d: %s\n",
+                        piece(gt).c_str(), gt, piece(ct).c_str(), ct, md3, ml3, R.picked(), ok3 ? "MATCH" : "MISMATCH");
+            std::fflush(stdout);
+        } else {
+            std::printf("big passes: not available (%s)\n", R.big_ok() ? "context under 384" : "TS5_DIRECT_BIG=0 or a weight the tiled kernels don't take");
+        }
         // Timed: 512 tokens (32 batches) queued, then the same as single tokens.
         std::vector<int32_t> filler(512);
         for (int i = 0; i < 512; i++) filler[i] = p2[i % np];
-        for (int mode = 0; mode < 2 && 512 <= ctx; mode++) {
+        for (int mode : {2, 0, 1}) {
+            if (512 > ctx || (mode == 2 && !R.big_ok())) continue;
             const uint64_t q0 = R.sent();
             auto h0 = std::chrono::steady_clock::now();
             for (int i = 0; i < 512;) {
-                if (mode == 0) {
+                if (mode == 2) {
+                    const int c = R.prompt_chunk(512 - i);
+                    if (!R.send_batch(filler.data() + i, c, i, i + c >= 512)) return fail(R.err() + " (timed prompt)");
+                    i += c;
+                } else if (mode == 0) {
                     if (!R.send_batch(filler.data() + i, Runner::kBatch, i, i + Runner::kBatch >= 512)) return fail(R.err() + " (timed prompt)");
                     i += Runner::kBatch;
                 } else {
@@ -223,7 +257,7 @@ int cmd_token(int argc, char** argv) {
             const double hs = std::chrono::duration<double>(std::chrono::steady_clock::now() - h0).count();
             const double gs = (R.t_end(R.sent() - 1) - R.t_start(q0)) / 100e6;
             std::printf("prompt of 512 tokens, %s: GPU %.1f ms = %.1f tok/s (host clock %.1f tok/s)\n",
-                        mode == 0 ? "batches of 16" : "a token at a time", gs * 1e3, 512 / gs, 512 / hs);
+                        mode == 2 ? "big passes" : mode == 0 ? "batches of 16" : "a token at a time", gs * 1e3, 512 / gs, 512 / hs);
             std::fflush(stdout);
         }
         // Where a batch's time goes: the same 512 tokens, each batch waited
@@ -232,14 +266,15 @@ int cmd_token(int argc, char** argv) {
             const bool was = R.opt.profile;
             R.opt.profile = true;
             std::vector<double> acc(S_COUNT, 0.0);
-            for (int i = 0; i < 512 && 512 <= ctx; i += Runner::kBatch) {
-                if (!R.send_batch(filler.data() + i, Runner::kBatch, i, i + Runner::kBatch >= 512) || !R.wait_all(60000)) return fail(R.err() + " (profiled prompt)");
+            for (int i = 0, c; i < 512 && 512 <= ctx; i += c) {
+                c = R.prompt_chunk(512 - i);
+                if (!R.send_batch(filler.data() + i, c, i, i + c >= 512) || !R.wait_all(60000)) return fail(R.err() + " (profiled prompt)");
                 R.add_profile(acc);
             }
             R.opt.profile = was;
             double tot = 0;
             for (double x : acc) tot += x;
-            std::printf("prompt profile (per prompt token, 512 tokens in batches of 16, %.2f ms a token in all):\n", tot / 512 * 1e3);
+            std::printf("prompt profile (per prompt token, 512 tokens in %s, %.2f ms a token in all):\n", R.big_ok() ? "big passes" : "batches of 16", tot / 512 * 1e3);
             for (int i = 0; i < S_COUNT; i++)
                 if (acc[i] > 0) std::printf("  %-18s %8.3f ms  %5.1f%%\n", kStepName[i], acc[i] / 512 * 1e3, 100 * acc[i] / tot);
         }
