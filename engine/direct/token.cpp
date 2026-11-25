@@ -233,7 +233,7 @@ int cmd_token(int argc, char** argv) {
             R.opt.profile = true;
             std::vector<double> acc(S_COUNT, 0.0);
             for (int i = 0; i < 512 && 512 <= ctx; i += Runner::kBatch) {
-                if (!R.send_batch(filler.data() + i, Runner::kBatch, i) || !R.wait_all(60000)) return fail(R.err() + " (profiled prompt)");
+                if (!R.send_batch(filler.data() + i, Runner::kBatch, i, i + Runner::kBatch >= 512) || !R.wait_all(60000)) return fail(R.err() + " (profiled prompt)");
                 R.add_profile(acc);
             }
             R.opt.profile = was;
