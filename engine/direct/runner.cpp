@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 
@@ -98,8 +99,11 @@ static int mm_sk(const Weight& w) {
     const int wg = (int)(w.ne1() / 32), NB = (int)(w.ne0() / 256), cap = std::min(max_sk, NB > 16 ? 2 : 4);
     if (w.type() == GGML_Q6_K)   // round 59, us a pass SK 1/2/4: attn_q 74/87/81, attn_k 45/26/20, gate/up 265/186/206, down 227/239/231
         return std::min(max_sk, wg <= 32 ? 4 : wg >= 384 ? 2 : 1);
+    // Each SK group's blocks a multiple of 4 (round 102b: Qwen3 0.6B's K 1024,
+    // NB 4, took SK 4 = one block a group and gave NaN; the 8B never splits
+    // below 4 blocks a group).
     int sk = 1;
-    while (sk < cap && wg * sk < 512 && NB % (2 * sk) == 0) sk *= 2;
+    while (sk < cap && wg * sk < 512 && NB % (2 * sk) == 0 && (NB / (2 * sk)) % 4 == 0) sk *= 2;
     return sk;
 }
 
@@ -682,20 +686,45 @@ bool Runner::prep_weights(std::string& err) {
     if (!jobs.empty()) {
         const auto t0 = std::chrono::steady_clock::now();
         if (!dv_->alloc((total + (64 << 10) + 4095) & ~(size_t)4095, kfd::Mem::Gtt, pbuf_)) { err = dv_->err() + " (reshaped weights)"; return false; }
+        // A cache of the reshaped bytes (round 102: 12.2 s to requantize the
+        // 0.6B on the PS5): $XDG_CACHE_HOME or ~/.cache, ts5/soknee/<model>-
+        // <size>-<mtime>-v1.bin. TS5_SOKNEE_CACHE=0: no cache.
+        std::string cpath;
+        {
+            const char* off = std::getenv("TS5_SOKNEE_CACHE");
+            const char* xdg = std::getenv("XDG_CACHE_HOME");
+            const char* home = std::getenv("HOME");
+            struct stat st;
+            if (!(off && std::atoi(off) == 0) && ((xdg && *xdg) || (home && *home)) && stat(m_->gguf.path.c_str(), &st) == 0) {
+                const std::string dir = (xdg && *xdg) ? std::string(xdg) + "/ts5/soknee" : std::string(home) + "/.cache/ts5/soknee";
+                const size_t sl = m_->gguf.path.find_last_of('/');
+                const std::string base = sl == std::string::npos ? m_->gguf.path : m_->gguf.path.substr(sl + 1);
+                cpath = dir + "/" + base + "-" + std::to_string((long long)st.st_size) + "-" + std::to_string((long long)st.st_mtime) + "-v1.bin";
+            }
+        }
+        bool cached = false;
+        if (!cpath.empty())
+            if (FILE* f = std::fopen(cpath.c_str(), "rb")) {
+                uint64_t hdr[3] = {0, 0, 0};
+                cached = std::fread(hdr, 8, 3, f) == 3 && hdr[0] == 0x3150485253355354ull && hdr[1] == total && hdr[2] == jobs.size() &&
+                         std::fread(pbuf_.cpu, 1, total, f) == total;
+                std::fclose(f);
+            }
         std::vector<uint8_t> tmp;
         for (Job& j : jobs) {
             Weight& w = *j.w;
             uint8_t* dst = (uint8_t*)pbuf_.cpu + j.off;
             const int64_t rows = w.ne1(), cols = w.ne0();
             const uint8_t* src = w.data;
-            if (j.rq && j.pd) {   // requantize, then pad
+            if (cached) {
+            } else if (j.rq && j.pd) {   // requantize, then pad
                 tmp.resize((size_t)rows * (size_t)cols / 256 * 144);
                 q4k_requantize(w.type(), src, (size_t)w.info->row_bytes(), rows, cols, tmp.data());
                 src = tmp.data();
             } else if (j.rq) q4k_requantize(w.type(), src, (size_t)w.info->row_bytes(), rows, cols, dst);
             const size_t rb = j.rq ? (size_t)cols / 256 * 144 : (size_t)w.info->row_bytes();
-            if (j.pd == 1) pad_q_rows(src, rb, NKV_, HD_, dst);
-            if (j.pd == 2) pad_o_cols(src, rows, (int)(cols / 256), dst);
+            if (j.pd == 1 && !cached) pad_q_rows(src, rb, NKV_, HD_, dst);
+            if (j.pd == 2 && !cached) pad_o_cols(src, rows, (int)(cols / 256), dst);
             GgufTensor& t = pinfo_.emplace_back(*w.info);
             if (j.rq) t.type = GGML_Q4_K;
             t.ne[0] = j.ne0;
@@ -704,8 +733,18 @@ bool Runner::prep_weights(std::string& err) {
             w.info = &t;
             w.data = dst;
         }
-        std::fprintf(stderr, "direct: %zu weights reshaped for the kernels (%.1f MB, %.2f s)\n", jobs.size(), total / 1e6,
-                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        if (!cached && !cpath.empty()) {   // best effort: mkdir -p, then a temporary file renamed into place
+            for (size_t at = 1; (at = cpath.find('/', at)) != std::string::npos; at++) mkdir(cpath.substr(0, at).c_str(), 0755);
+            const std::string tmpn = cpath + ".tmp" + std::to_string((long long)getpid());
+            if (FILE* f = std::fopen(tmpn.c_str(), "wb")) {
+                const uint64_t hdr[3] = {0x3150485253355354ull, total, jobs.size()};
+                const bool ok = std::fwrite(hdr, 8, 3, f) == 3 && std::fwrite(pbuf_.cpu, 1, total, f) == total;
+                if (std::fclose(f) == 0 && ok) std::rename(tmpn.c_str(), cpath.c_str());
+                else std::remove(tmpn.c_str());
+            }
+        }
+        std::fprintf(stderr, "direct: %zu weights reshaped for the kernels (%.1f MB, %.2f s%s)\n", jobs.size(), total / 1e6,
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), cached ? ", from the cache" : "");
     }
     if (pad) NQ_ = 4 * NKV_;
     outw_ = out ? out : tok_;

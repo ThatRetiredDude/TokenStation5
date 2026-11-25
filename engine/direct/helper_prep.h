@@ -114,7 +114,7 @@ inline void q4k_quantize_block(const float* x, uint8_t* out) {
 
 // A whole tensor (rows x ncols, ncols a multiple of 256) of any type
 // dequantize_row takes, as Q4_K: rows x ncols / 256 x 144 bytes at dst.
-// Big tables (the 0.6B's embeddings: 151936 rows) on every CPU core.
+// On every CPU core (round 102: one thread a 1024x3072 tensor made the 0.6B take 12.2 s).
 inline void q4k_requantize(uint32_t type, const uint8_t* src, size_t src_row_bytes, int64_t rows, int64_t ncols, uint8_t* dst) {
     const size_t drb = (size_t)ncols / 256 * 144;
     auto part = [=](int64_t r0, int64_t r1) {
@@ -124,7 +124,7 @@ inline void q4k_requantize(uint32_t type, const uint8_t* src, size_t src_row_byt
             for (int64_t b = 0; b < ncols / 256; b++) q4k_quantize_block(f.data() + 256 * b, dst + (size_t)r * drb + 144 * b);
         }
     };
-    const int nt = rows * ncols >= (1 << 22) ? (int)std::max(1u, std::min(16u, std::thread::hardware_concurrency())) : 1;
+    const int nt = rows * ncols >= (1 << 18) ? (int)std::max(1u, std::min(16u, std::thread::hardware_concurrency())) : 1;
     if (nt == 1) return part(0, rows);
     std::vector<std::thread> th;
     for (int i = 0; i < nt; i++) th.emplace_back(part, rows * i / nt, rows * (i + 1) / nt);
