@@ -1112,7 +1112,9 @@ Runner::Prog* Runner::mvt_prog(const Weight& w, int T) {
     // Round 121 mvt-test: Q4_K at T 4 runs K 8 at 1.38-1.56x one token
     // against K 4's 1.51-1.83x, and down (12,288 columns) is K 8's from T 2
     // (1.13 / 1.25 against 1.17 / 1.35); bit for bit either way.
-    if (!q6 && !k4set && (T == 4 || (w.ne0() >= 12288 && T >= 2))) kk = 8;
+    // Round 122b: in the full pass it was slower everywhere (T 4 at 4,000
+    // +1.0 ms), so it stays opt-in: TS5_DIRECT_MVT_K8AUTO=1.
+    if (!q6 && !k4set && env_int("TS5_DIRECT_MVT_K8AUTO", 0) && (T == 4 || (w.ne0() >= 12288 && T >= 2))) kk = 8;
     static const bool ilp = env_int("TS5_DIRECT_MVT_ILP", 1) != 0;   // Q6_K's dot products side by side (round 108)
     static const bool res = env_int("TS5_DIRECT_MVT_RES", 1) != 0;   // Q4_K's x staged once where it fits (round 110)
     const uint64_t key = (uint64_t)T << 48 | (uint64_t)w.type() << 32 | (uint64_t)w.ne0();
@@ -1176,10 +1178,11 @@ bool Runner::init_verify(std::string& err) {
     return true;
 }
 
-// TS5_DIRECT_VPAIR=0: T 4 shares K/V across all four tokens (round 113)
-// instead of two pairs (round 122).
+// TS5_DIRECT_VPAIR=1: T 4 as two K/V-sharing pairs (round 122) instead of
+// all four tokens in one workgroup (round 113).
 static bool vpair() {
-    static const bool on = !(std::getenv("TS5_DIRECT_VPAIR") && std::atoi(std::getenv("TS5_DIRECT_VPAIR")) == 0);
+    // Round 122b: bit for bit but no faster (T 4 at 4,000 +0.12 ms): opt-in, TS5_DIRECT_VPAIR=1.
+    static const bool on = std::getenv("TS5_DIRECT_VPAIR") && std::atoi(std::getenv("TS5_DIRECT_VPAIR")) == 1;
     return on;
 }
 
