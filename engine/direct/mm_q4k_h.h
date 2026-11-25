@@ -23,7 +23,9 @@
 
 namespace ts5::direct {
 
-// exp (timing only, wrong values): 1 no x loads in the loop, 2 no unpacking
+// exp (timing only, wrong values): 8 no weight loads in the loop (round 71:
+// is the weight stream what holds the multiply-adds at ~60% of the 22.8 TFLOP/s peak?),
+// 1 no x loads in the loop, 2 no unpacking
 // (the quant dword used as the f16 pair), 3 neither; 4 no f32 epilogue (with 1 2: 7 none of them).
 //
 // SK (1, 2, 4, 8): SK groups of 4 waves a workgroup (128 SK threads), group
@@ -122,7 +124,7 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
     // the next block's quants, unless this is the last (past the matrix's end)
     o("s_cmp_eq_u32 s16, 1");
     o("s_cbranch_scc1 noload");
-    load(B);
+    if (!(exp & 8)) load(B);
     k += "noload:\n";
     o("s_waitcnt vmcnt(" + S(3 * RW) + ")");
     auto bit = [](int byte) { return 8 * (byte % 4); };
