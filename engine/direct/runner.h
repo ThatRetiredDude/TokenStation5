@@ -27,6 +27,8 @@ public:
         bool light = true;     // invalidate the CU caches between dependent kernels (required for right results)
         bool fused = false;    // norm / SiLU staged inside the mat-vecs (round 36: 4-5% slower)
         bool profile = false;  // a stamp after each step (only with a wait per token)
+        bool vram_prompt = false;   // the prompt path's activations in VRAM (round 45 test), not GTT
+        bool skip_xt = false;       // timing only: the prompt path without to_xT (results wrong)
         bool mvonly = false;   // timing: skip everything but the mat-vecs once `timing` is set
     };
     Options opt;

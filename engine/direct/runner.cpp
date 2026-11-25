@@ -109,8 +109,11 @@ bool Runner::init_batch(std::string& err) {
                     std::make_pair(&pA_, T * A * 4), std::make_pair(&pG_, T * F_ * 4), std::make_pair(&pU_, T * F_ * 4),
                     std::make_pair(&pH_, T * F_ * 4), std::make_pair(&pxT_, KM * T * 4 + 4096), std::make_pair(&pxs32_, KM / 32 * T * 4 + 4096),
                     std::make_pair(&pxs16_, KM / 16 * T * 4 + 4096), std::make_pair(&ppart_, T * part_bytes_)}) {
-        if (!dev_.alloc((pr.second + 4095) & ~(size_t)4095, kfd::Mem::Gtt, *pr.first)) { err = dev_.err() + " (prompt buffers)"; return false; }
-        std::memset(pr.first->cpu, 0, pr.first->size);
+        if (!dev_.alloc((pr.second + 4095) & ~(size_t)4095, opt.vram_prompt ? kfd::Mem::Vram : kfd::Mem::Gtt, *pr.first)) {
+            err = dev_.err() + " (prompt buffers)";
+            return false;
+        }
+        if (pr.first->cpu) std::memset(pr.first->cpu, 0, pr.first->size);
     }
     return true;
 }
@@ -134,6 +137,7 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0) {
         return ok;
     };
     auto to_xT = [&](uint64_t y, int K) {
+        if (opt.skip_xt) return;
         Prog* p = xt_prog(K);
         const uint32_t args[8] = {lo(y), hi(y), lo(pxT_.gpu), hi(pxT_.gpu), lo(pxs32_.gpu), hi(pxs32_.gpu), lo(pxs16_.gpu), hi(pxs16_.gpu)};
         const uint32_t g[3] = {(uint32_t)(K / (1024 / kBatch)), 1, 1};

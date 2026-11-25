@@ -15,6 +15,7 @@
 #include "kfd.h"
 #include "mm_q4k.h"
 #include "mm_q6k.h"
+#include "prefill.h"
 #include "pm4.h"
 
 namespace ts5::direct {
@@ -168,6 +169,103 @@ int cmd_mm_q4k(int argc, char** argv) {
     }
     std::printf("%s: %s\n", q6 ? "mm-q6k" : "mm-q4k", all_ok ? "all values match the CPU" : "SOME VALUES WRONG");
     return all_ok ? 0 : 1;
+}
+
+// ts5-direct xt-bench: to_xT (prefill.h) against the CPU, then timed with
+// its buffers in GTT and in VRAM (round 44: 1.2 ms a prompt token in the
+// profile, which the kernel's own work can't explain).
+int cmd_xt_bench(int, char**) {
+    const int T = 16;
+    kfd::Device dev;
+    if (!dev.open() || !dev.create_queue(1 << 20)) { std::fprintf(stderr, "xt-bench: %s\n", dev.err().c_str()); return 1; }
+    uint64_t* sig = (uint64_t*)dev.signals.cpu;
+    uint64_t seq = 0;
+    sig[0] = 0;
+    kfd::Buffer ts;
+    if (!dev.alloc(4096, kfd::Mem::Gtt, ts)) return 1;
+    auto run = [&](pm4::Stream& body, double* gpu_s) -> bool {
+        pm4::Stream w;
+        w.acquire_all();
+        w.release(ts.gpu, 0, true);
+        w.w.insert(w.w.end(), body.w.begin(), body.w.end());
+        w.release(ts.gpu + 8, 0, true);
+        w.release(dev.signals.gpu, ++seq);
+        if (!dev.submit(w.w) || !dev.wait((volatile uint64_t*)sig, seq, 20000)) return false;
+        const uint64_t* tt = (const uint64_t*)ts.cpu;
+        *gpu_s = (tt[1] - tt[0]) / 100e6;
+        return true;
+    };
+    bool ok = true;
+    uint32_t seed = 99;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed; };
+    for (int K : {4096, 12288}) {
+        gfx10::Kernel k;
+        std::string err;
+        if (!gfx10::assemble(gen_to_xT(K, T), k, &err)) { std::fprintf(stderr, "xt-bench: %s\n", err.c_str()); return 1; }
+        kfd::Buffer code;
+        if (!dev.alloc(65536, kfd::Mem::Gtt, code)) return 1;
+        std::memcpy(code.cpu, k.code.data(), k.code.size() * 4);
+        for (kfd::Mem mem : {kfd::Mem::Gtt, kfd::Mem::Vram}) {
+            kfd::Buffer Y, xT, x32, x16;
+            if (!dev.alloc((size_t)T * K * 4, mem, Y) || !dev.alloc((size_t)T * K * 4, mem, xT) || !dev.alloc((size_t)K / 32 * T * 4, mem, x32) ||
+                !dev.alloc((size_t)K / 16 * T * 4, mem, x16)) {
+                std::fprintf(stderr, "xt-bench: %s\n", dev.err().c_str());
+                return 1;
+            }
+            const bool gtt = mem == kfd::Mem::Gtt;
+            if (gtt)
+                for (size_t i = 0; i < (size_t)T * K; i++) ((float*)Y.cpu)[i] = (float)((int)(rnd() >> 16) - 32768) / 32768.0f;
+            const uint32_t args[8] = {(uint32_t)Y.gpu, (uint32_t)(Y.gpu >> 32), (uint32_t)xT.gpu, (uint32_t)(xT.gpu >> 32),
+                                      (uint32_t)x32.gpu, (uint32_t)(x32.gpu >> 32), (uint32_t)x16.gpu, (uint32_t)(x16.gpu >> 32)};
+            const uint32_t g[3] = {(uint32_t)(K / (1024 / T)), 1, 1}, th[3] = {256, 1, 1};
+            double gs;
+            {
+                pm4::Stream s;
+                s.dispatch(k, code.gpu, args, 8, g, th);
+                if (!run(s, &gs)) { std::fprintf(stderr, "xt-bench: %s\n", dev.err().c_str()); return 1; }
+            }
+            if (gtt) {
+                const float* y = (const float*)Y.cpu;
+                const float* xt = (const float*)xT.cpu;
+                double worst = 0;
+                for (int c = 0; c < K; c++)
+                    for (int t = 0; t < T; t++) worst = std::max(worst, (double)std::fabs(xt[(size_t)c * T + t] - y[(size_t)t * K + c]));
+                for (int sub : {16, 32}) {
+                    const float* xs = (const float*)(sub == 16 ? x16.cpu : x32.cpu);
+                    for (int gi = 0; gi < K / sub; gi++)
+                        for (int t = 0; t < T; t++) {
+                            double a = 0;
+                            for (int c = 0; c < sub; c++) a += y[(size_t)t * K + gi * sub + c];
+                            worst = std::max(worst, std::fabs(xs[(size_t)gi * T + t] - a));
+                        }
+                }
+                std::printf("to_xT K %d: worst error %.3g %s\n", K, worst, worst < 1e-4 ? "ok" : "WRONG");
+                if (!(worst < 1e-4)) ok = false;
+            }
+            for (int chain = 0; chain < 2; chain++) {
+                std::vector<double> st;
+                for (int rep = 0; rep < 12; rep++) {
+                    pm4::Stream s;
+                    for (int i = 0; i < 20; i++) {
+                        if (i) {
+                            s.wait_kernels();
+                            if (chain) s.acquire_light();
+                        }
+                        s.dispatch(k, code.gpu, args, 8, g, th);
+                    }
+                    double tot;
+                    if (!run(s, &tot)) { std::fprintf(stderr, "xt-bench: %s\n", dev.err().c_str()); return 1; }
+                    if (rep >= 2) st.push_back(tot / 20);
+                }
+                std::sort(st.begin(), st.end());
+                std::printf("to_xT K %5d, %s, wait%s: %7.1f us a launch (%.1f GB/s moved)\n", K, gtt ? "GTT " : "VRAM", chain ? " + invalidate" : "",
+                            st[st.size() / 2] * 1e6, 2.0 * T * K * 4 / st[st.size() / 2] / 1e9);
+            }
+            std::fflush(stdout);
+        }
+    }
+    std::printf("xt-bench: %s\n", ok ? "to_xT matches the CPU" : "to_xT WRONG");
+    return ok ? 0 : 1;
 }
 
 }  // namespace ts5::direct
