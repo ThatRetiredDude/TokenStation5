@@ -1044,7 +1044,17 @@ bool Runner::init_verify(std::string& err) {
                     std::make_pair(&vt_, T * E_ * 4), std::make_pair(&vg_, T * F_ * 4), std::make_pair(&vu_, T * F_ * 4),
                     std::make_pair(&vh_, T * F_ * 4), std::make_pair(&vlog_, T * V_ * 4 + 4096), std::make_pair(&vpart_, T * 64 * NKV_ * 2112)})
         if (!dv_->alloc((pr.second + 4095) & ~(size_t)4095, kfd::Mem::Gtt, *pr.first)) { err = dv_->err() + " (verify activations)"; return false; }
+    // q/k norm + RoPE for all T tokens in one launch (the big passes' kernel:
+    // the same arithmetic, every pointer stepped a token by tgid_y)
+    if (!load(gen_qk_post(NQ_, hp.rms_eps, NKV_), k_qkv_, err)) { err = "verify qk kernel: " + err; return false; }
     return true;
+}
+
+// TS5_DIRECT_VBATCH=0: the verify pass's norms and q/k kernels a launch per
+// token (round 101), not one launch for all T (round 102).
+static bool vbatch() {
+    static const bool on = !(std::getenv("TS5_DIRECT_VBATCH") && std::atoi(std::getenv("TS5_DIRECT_VBATCH")) == 0);
+    return on;
 }
 
 bool Runner::send_verify(const int32_t* ids, int n, int pos0) {
@@ -1060,6 +1070,12 @@ bool Runner::send_verify(const int32_t* ids, int n, int pos0) {
 // mvt for every mat-vec, so each token's numbers are what build() makes.
 void Runner::build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4::Stream& s) {
     const HParams& hp = m_->hp;
+    int ns = 0;
+    auto stamp = [&](int step_id) {   // opt.profile: build()'s steps
+        if (!opt.profile) return;
+        ((uint32_t*)bstamp_.cpu)[2048 + ns] = (uint32_t)step_id;
+        s.stamp(bstamp_.gpu + 8 * ns++);
+    };
     auto barrier = [&]() {
         s.wait_kernels();
         if (opt.light) s.acquire_light();
@@ -1075,19 +1091,23 @@ void Runner::build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4
         const uint32_t g[3] = {wgs_, 1, 1};
         s.dispatch(p->k, p->code.gpu, args, 10, g, t256);
     };
+    const bool vb = vbatch();
     auto norm = [&](bool add, const Weight& w) {
         const Prog& p = add ? k_addnorm_ : k_norm_;
         const uint64_t a = addr(w.data);
-        for (int t = 0; t < T; t++) {
+        // batched: workgroup t takes token t's row (rmsnorm's s8), the same
+        // arithmetic as a launch per token
+        for (int t = 0; t < (vb ? 1 : T); t++) {
             const uint64_t x = vx_.gpu + t * xE, xn = vxn_.gpu + t * xE, tt = vt_.gpu + t * xE;
             const uint32_t args[8] = {lo(x), hi(x), lo(a), hi(a), lo(xn), hi(xn), lo(tt), hi(tt)};
-            const uint32_t g[3] = {1, 1, 1};
+            const uint32_t g[3] = {vb ? (uint32_t)T : 1u, 1, 1};
             s.dispatch(p.k, p.code.gpu, args, 8, g, t256);
         }
     };
     if (seq == 0) s.acquire_all();
     else barrier();
     s.stamp(bts_.gpu + 16 * (seq % (bts_.size / 16)));
+    stamp(-1);
     for (int t = 0; t < T; t++) {
         const uint64_t te = addr(tok_.data), io = bids_.gpu + 4 * (size_t)(pos0 + t), x = vx_.gpu + t * xE;
         const uint32_t args[10] = {lo(te), hi(te), lo(x), hi(x), lo(bslot_.gpu), hi(bslot_.gpu), (uint32_t)ids[t], 0, lo(io), hi(io)};
@@ -1095,27 +1115,33 @@ void Runner::build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4
         s.dispatch(k_embed_.k, k_embed_.code.gpu, args, 10, g, th);
     }
     barrier();
+    stamp(S_EMBED);
     for (int l = 0; l < hp.n_layer; l++) {
         const Layer& L = lay_[l];
         const uint64_t kc = bkv_.gpu + (size_t)l * 2 * kv_layer_, vc = kc + kv_layer_;
         if (l) barrier();
+        if (l) stamp(S_DOWN);
         norm(l > 0, L.attn_norm);
         barrier();
+        stamp(S_NORM);
         mvt(L.wq, vxn_.gpu, xE, vq_.gpu, xA);
         mvt(L.wk, vxn_.gpu, xE, vk_.gpu, xKV);
         mvt(L.wv, vxn_.gpu, xE, vv_.gpu, xKV);
         barrier();
-        for (int t = 0; t < T; t++) {
+        stamp(S_QKV);
+        for (int t = 0; t < (vb ? 1 : T); t++) {   // batched: k_qkv_, token tgid_y
             const int pos = pos0 + t;
             const uint64_t q = vq_.gpu + t * xA, k = vk_.gpu + t * xKV, v = vv_.gpu + t * xKV;
             const uint64_t qn = addr(L.q_norm.data), kn = addr(L.k_norm.data), rr = brope_.gpu + (size_t)pos * 512;
             const uint64_t kr = kc + (size_t)pos * NKV_ * HD_ * 2, vr = vc + (size_t)pos * NKV_ * HD_ * 2;
             const uint32_t args[16] = {lo(q),  hi(q),  lo(k),  hi(k),  lo(v),  hi(v),  lo(qn), hi(qn),
                                        lo(kn), hi(kn), lo(rr), hi(rr), lo(kr), hi(kr), lo(vr), hi(vr)};
-            const uint32_t g[3] = {(uint32_t)(NQ_ + NKV_), 1, 1};
-            s.dispatch(k_qk_.k, k_qk_.code.gpu, args, 16, g, t64);
+            const uint32_t g[3] = {(uint32_t)(NQ_ + NKV_), vb ? (uint32_t)T : 1u, 1};
+            const Prog& p = vb ? k_qkv_ : k_qk_;
+            s.dispatch(p.k, p.code.gpu, args, 16, g, t64);
         }
         barrier();
+        stamp(S_QK);
         for (int t = 0; t < T; t++) {
             const uint32_t n = pos0 + t + 1, nch = (n + 255) / 256, per = (nch + dsplits() - 1) / dsplits(), splits = (nch + per - 1) / per;
             const uint64_t q = vq_.gpu + t * xA, part = vpart_.gpu + t * pb;
@@ -1133,29 +1159,36 @@ void Runner::build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4
             s.dispatch(k_red_.k, k_red_.code.gpu, a2, 10, g2, t256);
         }
         barrier();
+        stamp(S_ATTN);
         mvt(L.wo, vatt_.gpu, xA, vt_.gpu, xE);
         barrier();
+        stamp(S_WO);
         norm(true, L.ffn_norm);
         barrier();
+        stamp(S_NORM2);
         mvt(L.w_gate, vxn_.gpu, xE, vg_.gpu, xF);
         mvt(L.w_up, vxn_.gpu, xE, vu_.gpu, xF);
         barrier();
+        stamp(S_GATEUP);
         {
             const uint32_t args[6] = {lo(vg_.gpu), hi(vg_.gpu), lo(vu_.gpu), hi(vu_.gpu), lo(vh_.gpu), hi(vh_.gpu)};
             const uint32_t g[3] = {(uint32_t)((size_t)T * F_ / 1024), 1, 1};
             s.dispatch(k_silu_.k, k_silu_.code.gpu, args, 6, g, t256);
         }
         barrier();
+        stamp(S_SILU);
         mvt(L.w_down, vh_.gpu, xF, vt_.gpu, xE);
     }
     barrier();
+    stamp(S_DOWN);
     norm(true, m_->out_norm);
     barrier();
     mvt(outw_, vxn_.gpu, xE, vlog_.gpu, (size_t)V_ * 4);
     barrier();
+    stamp(S_OUT);
     s.release(bts_.gpu + 16 * (seq % (bts_.size / 16)) + 8, 0, true);
     s.release((dv_->signals.gpu + sig_), seq + 1);
-    nstamps_ = 0;
+    nstamps_ = ns;
 }
 
 }  // namespace ts5::direct

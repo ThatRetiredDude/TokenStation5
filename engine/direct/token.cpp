@@ -448,7 +448,7 @@ int cmd_pprof(int argc, char** argv) {
 // verify passes of T: every logits row must be bit for bit the one-token
 // run's. GPU ms a token and a pass from the queue's timestamps.
 int cmd_verify_test(int argc, char** argv) {
-    if (argc < 3) return fail("usage: verify-test MODEL.gguf [tokens] [prompt] [context]");
+    if (argc < 3) return fail("usage: verify-test MODEL.gguf [tokens] [prompt] [context] [profile]");
     const int n = argc > 3 ? std::atoi(argv[3]) : 48, P = argc > 4 ? std::atoi(argv[4]) : 512, ctx = argc > 5 ? std::atoi(argv[5]) : 4096;
     if (n < 4 || P < 1 || P + n > ctx) return fail("tokens 4 or more, prompt + tokens at most the context");
     Model m;
@@ -519,6 +519,42 @@ int cmd_verify_test(int argc, char** argv) {
         std::fflush(stdout);
     }
     std::printf("verify-test: %s\n", bad ? "MISMATCH" : "all bit for bit the same");
+    // profile (round 102): where a verify pass of T tokens spends its time,
+    // step by step, beside one token's (16 passes each, a wait after each)
+    if (argc > 6 && std::strcmp(argv[6], "profile") == 0) {
+        std::vector<std::vector<double>> acc(Runner::kVerify + 1);
+        R.opt.profile = true;
+        for (int T = 1; T <= Runner::kVerify; T++) {
+            if (!send_prompt()) return fail(R.err() + " (verify-test prompt)");
+            int done = 0;
+            for (int i = 0; i + T <= n && done < 16; i += T, done++) {
+                const bool ok = T == 1 ? R.send(gen[i], P + i) : R.send_verify(gen.data() + i, T, P + i);
+                if (!ok || !R.wait_all()) return fail(R.err() + " (verify-test profile)");
+                R.add_profile(acc[T]);
+            }
+            for (double& v : acc[T]) v /= std::max(1, done);
+        }
+        R.opt.profile = false;
+        std::printf("verify-test profile (ms a pass; T 1 is one token's send):\n  %-18s", "step");
+        for (int T = 1; T <= Runner::kVerify; T++) std::printf("     T %d", T);
+        std::printf("\n");
+        std::vector<double> tot(Runner::kVerify + 1, 0.0);
+        for (int i = 0; i < S_COUNT; i++) {
+            bool any = false;
+            for (int T = 1; T <= Runner::kVerify; T++) any = any || (i < (int)acc[T].size() && acc[T][i] > 0);
+            if (!any) continue;
+            std::printf("  %-18s", kStepName[i]);
+            for (int T = 1; T <= Runner::kVerify; T++) {
+                const double v = i < (int)acc[T].size() ? acc[T][i] : 0.0;
+                tot[T] += v;
+                std::printf(" %8.3f", v * 1e3);
+            }
+            std::printf("\n");
+        }
+        std::printf("  %-18s", "total");
+        for (int T = 1; T <= Runner::kVerify; T++) std::printf(" %8.3f", tot[T] * 1e3);
+        std::printf("\n");
+    }
     return bad != 0;
 }
 
