@@ -213,6 +213,14 @@ bool Engine::repair(const std::vector<int32_t> &prompt, size_t &keep, GenStats &
     return true;
 }
 
+size_t Engine::helper_depth() {
+    static const size_t d = [] {
+        const char *v = std::getenv("TS5_HELPER_DEPTH");
+        return v && std::atol(v) > 0 ? (size_t)std::atol(v) : (size_t)2048;
+    }();
+    return d;
+}
+
 // TS5_HELPER_RATIO: the most a helper's draft token may cost, as a share
 // of the target's one-token forward, for it to draft (default 0.25).
 static double helper_ratio() {
