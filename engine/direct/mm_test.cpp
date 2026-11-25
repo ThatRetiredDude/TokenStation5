@@ -572,7 +572,9 @@ int cmd_bw_peak(int, char**) {
                 const uint32_t args[4] = {(uint32_t)B.gpu, (uint32_t)(B.gpu >> 32), (uint32_t)out.gpu, (uint32_t)(out.gpu >> 32)};
                 const uint32_t g[3] = {wg, 1, 1}, th[3] = {256, 1, 1};
                 std::vector<double> st;
-                for (int rep = 0; rep < 6; rep++) {
+                // the clock ramps from idle over ~50-100 ms (rounds 12, 20, 74):
+                // 150 launches, the last 50 timed
+                for (int rep = 0; rep < 150; rep++) {
                     pm4::Stream w;
                     w.acquire_all();
                     w.release(ts.gpu, 0, true);
@@ -582,7 +584,7 @@ int cmd_bw_peak(int, char**) {
                     w.release(dev.signals.gpu, ++seq);
                     if (!dev.submit(w.w) || !dev.wait((volatile uint64_t*)sig, seq, 20000)) { std::fprintf(stderr, "bw-peak: %s\n", dev.err().c_str()); return 1; }
                     const uint64_t* tt = (const uint64_t*)ts.cpu;
-                    if (rep) st.push_back((tt[1] - tt[0]) / 100e6);
+                    if (rep >= 100) st.push_back((tt[1] - tt[0]) / 100e6);
                 }
                 std::sort(st.begin(), st.end());
                 std::printf("bw-peak %s %s, %2d loads a lane, %6u workgroups: %8.1f us, %6.1f MB read, %6.1f GB/s\n", mem == kfd::Mem::Gtt ? "GTT " : "VRAM",
