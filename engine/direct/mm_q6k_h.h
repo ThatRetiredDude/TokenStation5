@@ -25,6 +25,7 @@
 // Arguments as mm_q6k: s[0:1] W, s[2:3] xT (K x T), s[4:5] Y (T x R), s6 R,
 // s[8:9] xs (K/16 x T); s10 workgroup id. Grid: R / 32 workgroups of 128.
 #pragma once
+#include <algorithm>
 #include <string>
 
 namespace ts5::direct {
@@ -33,14 +34,20 @@ namespace ts5::direct {
 // g + SK, .. (as mm_q4k_h; round 58: SK 2-4 fills the GPU on 4096- and
 // 1024-row matrices). With SK even a group's blocks are all even or all odd,
 // so its alignment shift is fixed and its blocks 210 SK bytes apart.
-inline std::string gen_mm_q6k_h(int K, int T, int SK = 1) {
+// BK: as mm_q4k_h, the f16 sums in VGPR banks 0-2, the weight pairs in bank 3
+// (no bank conflicts in the multiply-adds).
+inline std::string gen_mm_q6k_h(int K, int T, int SK = 1, bool BK = true) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
     const int NB = K / 256, RB = NB * 210, P = T / 2;
     if (NB % SK || (SK > 1 && SK % 2)) return "";
     const int A = 8, B = 28;                     // 4 pieces of 5 dwords: ql[l], ql[l + 32], qh[l], scales + d
-    const int ACC = 48, TMP = 48 + T, U = TMP + P, DSC = U + 8, M32 = U + 12;
+    const int ACC = 48, TMP = 48 + T;
+    BK = BK && TMP % 4 == 0;
+    const int U = BK ? TMP + std::max(8, 4 * ((P - 1) / 3) + (P - 1) % 3 + 1) : TMP + P, DSC = U + 8, M32 = U + 12;
+    auto tr = [&](int p) { return BK ? TMP + 4 * (p / 3) + p % 3 : TMP + p; };   // f16 sum p
+    const int W0 = BK ? TMP + 3 : U + 5, W1 = BK ? TMP + 7 : U + 6;
     const int SX = 20, SXS = 84;
     k += ".kernel mm_q6k_h\n.wave32\n.user_sgprs 10\n.tgid_x\n.lds " + S(4 * SK * T * 128) + "\n";
     o("v_lshrrev_b32 v2, 5, v0");
@@ -180,7 +187,7 @@ inline std::string gen_mm_q6k_h(int K, int T, int SK = 1) {
         }
         o("v_lshl_or_b32 " + u + ", " + u1 + ", 4, " + u);
         // to f16 pairs by the exponent trick (as mm_q4k_h): W0 columns 0 and 2, W1 1 and 3
-        const std::string w0 = "v" + S(U + 5), w1 = "v" + S(U + 6);
+        const std::string w0 = "v" + S(W0), w1 = "v" + S(W1);
         o("v_and_or_b32 " + w0 + ", " + u + ", 0x003f003f, s103");
         o("v_lshrrev_b32 " + u1 + ", 8, " + u);
         o("v_and_or_b32 " + w1 + ", " + u1 + ", 0x003f003f, s103");
@@ -190,7 +197,7 @@ inline std::string gen_mm_q6k_h(int K, int T, int SK = 1) {
             const std::string w = (c & 1) ? w1 : w0;
             const bool hi = c >> 1;
             for (int p = 0; p < P; p++) {
-                const std::string x = "s" + S(buf(st) + c * P + p), d = "v" + S(TMP + p);
+                const std::string x = "s" + S(buf(st) + c * P + p), d = "v" + S(tr(p));
                 if (kk == 0 && c == 0) o("v_pk_mul_f16 " + d + ", " + x + ", " + w + (hi ? " op_sel:[0,1] op_sel_hi:[1,1]" : " op_sel_hi:[1,0]"));
                 else o("v_pk_fma_f16 " + d + ", " + x + ", " + w + ", " + d + (hi ? " op_sel:[0,1,0] op_sel_hi:[1,1,1]" : " op_sel_hi:[1,0,1]"));
             }
@@ -204,7 +211,7 @@ inline std::string gen_mm_q6k_h(int K, int T, int SK = 1) {
                 for (int h = 0; h < 2; h++) {
                     const int t = 2 * p + h;
                     const std::string a = "v" + S(ACC + t);
-                    o("v_fma_mix_f32 " + a + ", v" + S(U + 5) + ", v" + S(TMP + p) + ", " + a + " op_sel:[0," + S(h) + ",0] op_sel_hi:[0,1,0]");
+                    o("v_fma_mix_f32 " + a + ", v" + S(U + 5) + ", v" + S(tr(p)) + ", " + a + " op_sel:[0," + S(h) + ",0] op_sel_hi:[0,1,0]");
                     o("v_fmac_f32 " + a + ", s" + S(SXS + t) + ", v" + S(U + 6));
                 }
         }
