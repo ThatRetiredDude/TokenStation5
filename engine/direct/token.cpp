@@ -312,6 +312,34 @@ int cmd_token(int argc, char** argv) {
             for (int i = 0; i < S_COUNT; i++)
                 if (acc[i] > 0) std::printf("  %-18s %8.3f ms  %5.1f%%\n", kStepName[i], acc[i] / 512 * 1e3, 100 * acc[i] / tot);
         }
+        // Round 86: the same profile for a 512-token pass at depth ctx - 512
+        // (the cache filled by unprofiled passes first), with attn_t and with
+        // attn_part2: where a long prompt's time goes.
+        if (R.big_ok() && ctx >= 1024 && ctx % 512 == 0) {
+            std::vector<int32_t> fill(ctx);
+            for (int i = 0; i < ctx; i++) fill[i] = p2[(i * 11) % np];
+            const bool pairs = R.opt.attn_pairs;
+            for (int mode = 0; mode < 2; mode++) {
+                R.opt.attn_pairs = mode == 1;
+                for (int i = 0; i < ctx - 512; i += 512)
+                    if (!R.send_batch(fill.data() + i, 512, i, false)) return fail(R.err() + " (deep profile)");
+                if (!R.wait_all(300000)) return fail(R.err() + " (deep profile)");
+                const bool was = R.opt.profile;
+                R.opt.profile = true;
+                std::vector<double> acc(S_COUNT, 0.0);
+                if (!R.send_batch(fill.data() + ctx - 512, 512, ctx - 512, true) || !R.wait_all(60000)) return fail(R.err() + " (deep profile)");
+                R.add_profile(acc);
+                R.opt.profile = was;
+                double tot = 0;
+                for (double x : acc) tot += x;
+                std::printf("prompt profile at depth %d (512 tokens, one big pass, %s, %.3f ms a token in all):\n", ctx - 512,
+                            mode ? "attn_part2" : "attn_t", tot / 512 * 1e3);
+                for (int i = 0; i < S_COUNT; i++)
+                    if (acc[i] > 0) std::printf("  %-18s %8.3f ms  %5.1f%%\n", kStepName[i], acc[i] / 512 * 1e3, 100 * acc[i] / tot);
+                std::fflush(stdout);
+            }
+            R.opt.attn_pairs = pairs;
+        }
     } else {
         std::printf("prompt batches: not available for this model\n");
     }
