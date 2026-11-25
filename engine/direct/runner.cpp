@@ -163,6 +163,8 @@ static bool attn2() {   // TS5_DIRECT_ATTN2=0: the old attention a token at a ti
 namespace {
 struct Pace {
     int fd = -1, long_tokens = 1024;
+    int soc_fd = -1;                       // ps5_fan's "MainSoC" (round 113)
+    double soc_knee = 78, soc_max = 8;
     double hot = 83, cool = 75;   // round 82: 80/70 gave 873-903 tok/s, 83/75 928 at Tctl max 78.75
     // Round 93: unpaced, pp8192 settles at 85.75-86.5 C and runs a steady
     // ~602 tok/s; at 88/82 one 50 ms spike to 88 cost a pause and 12%
@@ -177,6 +179,27 @@ struct Pace {
         if (const char* h = std::getenv("TS5_DIRECT_HOT_LONG")) hot_long = std::atof(h);
         if (const char* c = std::getenv("TS5_DIRECT_COOL_LONG")) cool_long = std::atof(c);
         if (const char* l = std::getenv("TS5_DIRECT_LONG")) long_tokens = std::atoi(l);
+        if (const char* k = std::getenv("TS5_DIRECT_SOC_KNEE")) soc_knee = std::atof(k);
+        if (const char* m = std::getenv("TS5_DIRECT_SOC_MAX")) soc_max = std::atof(m);
+        for (int i = 0; i < 32 && soc_fd < 0; i++) {
+            char path[80], name[32] = {0};
+            std::snprintf(path, sizeof path, "/sys/class/hwmon/hwmon%d/name", i);
+            FILE* f = std::fopen(path, "r");
+            if (!f) continue;
+            const bool fan = std::fgets(name, sizeof name, f) && std::strncmp(name, "ps5_fan", 7) == 0;
+            std::fclose(f);
+            for (int t = 1; fan && t <= 8 && soc_fd < 0; t++) {
+                char label[32] = {0};
+                std::snprintf(path, sizeof path, "/sys/class/hwmon/hwmon%d/temp%d_label", i, t);
+                FILE* g = std::fopen(path, "r");
+                if (!g) continue;
+                const bool soc = std::fgets(label, sizeof label, g) && std::strncmp(label, "MainSoC", 7) == 0;
+                std::fclose(g);
+                if (!soc) continue;
+                std::snprintf(path, sizeof path, "/sys/class/hwmon/hwmon%d/temp%d_input", i, t);
+                soc_fd = open(path, O_RDONLY | O_CLOEXEC);
+            }
+        }
         for (int i = 0; i < 32 && fd < 0; i++) {
             char path[64], name[32] = {0};
             std::snprintf(path, sizeof path, "/sys/class/hwmon/hwmon%d/name", i);
@@ -189,7 +212,9 @@ struct Pace {
             fd = open(path, O_RDONLY | O_CLOEXEC);
         }
     }
-    double read() const {   // C, or -1
+    double read_soc() const { return read_fd(soc_fd); }   // C, or -1
+    double read() const { return read_fd(fd); }           // Tctl, C, or -1
+    static double read_fd(int fd) {
         char b[24];
         if (fd < 0) return -1;
         ssize_t n = pread(fd, b, sizeof b - 1, 0);
@@ -600,7 +625,13 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
             s.release((dv_->signals.gpu + sig_) + 64, ++lseq_);
             if (lseq_ > 2 && !dv_->wait(lf, lseq_ - 2, 60000)) return false;
             const bool lp = prompt_tokens_ >= pace().long_tokens;
-            const double hot = lp ? pace().hot_long : pace().hot, cool = lp ? pace().cool_long : pace().cool;
+            // Round 113: after ~2 minutes of non-stop work the PS5's MainSoC
+            // sensor soaks to ~85 C, Tctl rides 90-90.75 and a 13.5k prompt
+            // at 89 / 83 crossed 91. Past TS5_DIRECT_SOC_KNEE (default 78 C)
+            // both lines come down a degree for each degree MainSoC is over
+            // it, at most TS5_DIRECT_SOC_MAX (default 8).
+            const double soc = pace().read_soc(), adj = soc > pace().soc_knee ? std::min(pace().soc_max, soc - pace().soc_knee) : 0.0;
+            const double hot = (lp ? pace().hot_long : pace().hot) - adj, cool = (lp ? pace().cool_long : pace().cool) - adj;
             const double tc = pace().read();
             hot_n_ = tc >= hot ? hot_n_ + 1 : 0;
             if (hot_n_ >= 2 || tc >= hot + 1) {

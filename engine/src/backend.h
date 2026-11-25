@@ -61,6 +61,12 @@ public:
     // may start and still find the keys it needs: a sliding layer's ring
     // (Gemma 3) holds only so many positions; unlimited elsewhere.
     virtual int rewind_limit() const { return 1 << 30; }
+    // The most tokens a forward call without logits may take and still
+    // write each position's K/V bit for bit as a call of one token would
+    // (TS5_KV_REPAIR replays shorter calls this many at a time, longer
+    // ones as they were made). SoKnee: 3 (from 4 its prompt kernels, whose
+    // rounding differs).
+    virtual int exact_call_max() const { return 8; }
     // A backend whose state only goes forward (rewind_limit() 0: Qwen3.5's
     // linear layers) keeps state_slots() copies of it, so a request that
     // shares the start of the last one goes on from a copy, not from the

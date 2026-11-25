@@ -134,7 +134,7 @@ private:
     static constexpr bool track_ = true;
 #endif
     bool repair_ = kv_repair_wanted();
-    void note_call(int pos, int n);
+    void note_call(int pos, int n, bool gen = false);
     void written_over(int pos, int n);
     void cut_cache(size_t keep);
     // Raises keep to the longest prefix of the prompt a shadow gives back

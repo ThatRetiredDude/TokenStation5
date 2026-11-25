@@ -81,6 +81,8 @@ public:
         return forward(tokens, n, pos0, nullptr, false, err);
     }
     int in_place_rows() const override { return r_.verify_ok() ? direct::Runner::kVerify : 1; }
+    // forward() without logits sends up to 3 tokens one at a time; from 4 the prompt kernels
+    int exact_call_max() const override { return 3; }
     // A helper's drafts (round 104): the tokens in, then k - 1 sends of the
     // last argmax (send(-1)), one wait; drafts are the tokens those sends
     // embedded, and the last argmax.

@@ -111,11 +111,15 @@ void Engine::written_over(int pos, int n) {
     }
 }
 
-void Engine::note_call(int pos, int n) {
+void Engine::note_call(int pos, int n, bool gen) {
     if (!track_) return;
     written_over(pos, n);
     while (!runs_.empty() && runs_.back().start >= pos) runs_.pop_back();
-    if (n > 8 || runs_.empty() || runs_.back().n > 8) runs_.push_back({pos, n});
+    // gen: a generation step (one token, or a verify pass whose K/V are bit
+    // for bit one token's), noted as one-token positions whatever its n
+    const int sm = b_->exact_call_max();
+    if (gen && n > sm) n = 1;
+    if (n > sm || runs_.empty() || runs_.back().n > sm) runs_.push_back({pos, n});
 }
 
 void Engine::cut_cache(size_t keep) {
@@ -131,9 +135,10 @@ bool Engine::repair(const std::vector<int32_t> &prompt, size_t &keep, GenStats &
     // A shadow's calls to forward again: from the run that holds lo, while
     // a position before both m and the end of what was written over (hi,
     // or past it where a call forwarded again writes beyond its run) is not
-    // yet back. Positions of up to 8-token calls cost about 3 prompt
-    // positions each, forwarded 8 at a time.
+    // yet back. Positions of up to 8-token calls (Backend::exact_call_max)
+    // cost about 3 prompt positions each, forwarded that many at a time.
     struct Call { int pos, n; };
+    const int sm = b_->exact_call_max();
     auto plan = [&](const Shadow &sh, int m, std::vector<Call> &calls) {
         calls.clear();
         long cost = 0;
@@ -144,13 +149,13 @@ bool Engine::repair(const std::vector<int32_t> &prompt, size_t &keep, GenStats &
             const Run &r = sh.runs[j];
             if (r.start >= need || r.start >= m) break;
             const int end = j + 1 < sh.runs.size() ? sh.runs[j + 1].start : (int)sh.tokens.size();
-            if (r.n > 8) {
+            if (r.n > sm) {
                 calls.push_back({r.start, r.n});
                 cost += r.n;
                 need = std::max(need, r.start + r.n);
             } else {
                 const int to = std::min({end, need, m});
-                for (int i = std::max(r.start, sh.lo); i < to; i += 8) calls.push_back({i, std::min(8, to - i)});
+                for (int i = std::max(r.start, sh.lo); i < to; i += sm) calls.push_back({i, std::min(sm, to - i)});
                 cost += 3L * std::max(0, to - std::max(r.start, sh.lo));
             }
         }
@@ -804,7 +809,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
             t_fwd[nb] = t_fwd[nb] > 0 ? 0.8 * t_fwd[nb] + 0.2 * dt : dt;
         }
         if (!ok) { forget_cache(); return false; }
-        note_call((int)cached_.size(), nb);
+        note_call((int)cached_.size(), nb, true);
         written_ = std::max(written_, (int)cached_.size() + nb);
         const float *lg = in_place ? b_->logits_view() : lgb.data();
         st.drafted += nb - 1;
