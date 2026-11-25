@@ -175,6 +175,14 @@ const Pace& pace() {
 }
 }  // namespace
 
+static uint32_t dsplits() {   // generation's attention splits at most (TS5_DIRECT_DSPLITS, 1-64)
+    static const uint32_t n = [] {
+        const char* e = std::getenv("TS5_DIRECT_DSPLITS");
+        const int v = e ? std::atoi(e) : 40;
+        return (uint32_t)std::min(64, std::max(1, v));
+    }();
+    return n;
+}
 static bool xt2() {
     static const bool on = std::getenv("TS5_DIRECT_XT2") && std::atoi(std::getenv("TS5_DIRECT_XT2")) == 1;
     return on;
@@ -663,7 +671,7 @@ bool Runner::init(Model& m, int n_ctx, std::string& err) {
                     std::make_pair(&batt_, (size_t)NQ_ * HD_ * 4), std::make_pair(&bt_, (size_t)E_ * 4), std::make_pair(&bg_, (size_t)F_ * 4),
                     std::make_pair(&bu_, (size_t)F_ * 4), std::make_pair(&bh_, (size_t)F_ * 4), std::make_pair(&blog_, (size_t)V_ * 4 + 4096),
                     std::make_pair(&bkv_, kv_layer_ * 2 * hp.n_layer), std::make_pair(&brope_, (size_t)ctx_ * 128 * 4),
-                    std::make_pair(&bpart_, (size_t)10 * NKV_ * 2112), std::make_pair(&bstamp_, (size_t)8 * 4096),
+                    std::make_pair(&bpart_, (size_t)64 * NKV_ * 2112), std::make_pair(&bstamp_, (size_t)8 * 4096),
                     std::make_pair(&bslot_, (size_t)4096), std::make_pair(&bids_, (size_t)ctx_ * 4), std::make_pair(&bts_, (size_t)16 << 20)})
         if (!dev_.alloc((pr.second + 4095) & ~(size_t)4095, kfd::Mem::Gtt, *pr.first)) { err = dev_.err() + " (activations)"; return false; }
     std::memset(bslot_.cpu, 0, 4096);
@@ -743,7 +751,10 @@ void Runner::build(int32_t id, int pos, uint64_t seq, pm4::Stream& s) {
         s.dispatch(p.k, p.code.gpu, args, 8, g, t256);
     };
     auto blk = [&](int l, int i) { return bblk_.gpu + ((size_t)l * 5 + i) * 32; };
-    const uint32_t n = pos + 1, nch = (n + 255) / 256, per = (nch + 9) / 10, splits = (nch + per - 1) / per;
+    // Round 88: up to dsplits() splits (default 40, was 10): at 8k positions
+    // 10 splits gave 80 workgroups of 1024 positions, too few to fill the
+    // memory pipe (generation after 8k: 55 tok/s, Vulkan 59).
+    const uint32_t n = pos + 1, nch = (n + 255) / 256, per = (nch + dsplits() - 1) / dsplits(), splits = (nch + per - 1) / per;
     if (seq == 0) s.acquire_all();   // what the host wrote: weights, RoPE table, slot
     else barrier();                  // the last token's argmax
     s.stamp(bts_.gpu + 16 * (seq % (bts_.size / 16)));

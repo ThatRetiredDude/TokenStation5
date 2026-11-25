@@ -27,13 +27,18 @@ inline std::string gen_attn_f() {
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
     auto v = [&](int a) { return "v" + S(a); };
     auto vr = [&](int a, int n) { return "v[" + S(a) + ":" + S(a + n - 1) + "]"; };
-    const int LQ = 0, LK = 32768, LV = 40960, LP = 49152;
+    // Round 88 layout (round 87's rows 256 or 1024 bytes apart put a wave's
+// distinct addresses in one LDS bank): Q row (h, tt) at (32 h + tt) 272, K
+// rows 272 apart with thread lo scoring positions lo + 8 j, P row (h, tt) at
+// (32 h + tt) 80 with a lane's 4 values together (entry 4 lo + j = position
+// lo + 8 j), V rows 256 apart.
+    const int LQ = 0, LK = 34816, LV = 43520, LP = 51712, QS = 272, KS = 272, PS = 80;
     // VGPRs: v0 tid, v1 rg, v2 lo, v3 Q read (rg 1024), v4 K read (LK + lo 1024),
     // v5 P write (LP + rg 256 + lo 8), v6 P read (LP + rg 256), v7 V read
     // (LV + lo 32), v8 K/V write (tid 32), v9 address, v10 (tid & 7) 32 + 256 g,
     // v11 tid >> 3, v12 lim, v13 lim - c - 4 lo, v14-15 temps.
     const int M = 16, L = 20, AL = 24, SC = 28, PF = 44, ACC = 60, O = 92, B = 156;
-    k += ".kernel attn_f\n.wave32\n.user_sgprs 14\n.tgid_x\n.tgid_y\n.lds 57344\n";
+    k += ".kernel attn_f\n.wave32\n.user_sgprs 14\n.tgid_x\n.tgid_y\n.lds 61952\n";
     o("s_and_b32 s16, s14, 7");                    // g
     o("s_lshr_b32 s17, s14, 3");                   // split
     o("s_mul_i32 s18, s17, s10");                  // ps
@@ -52,15 +57,18 @@ inline std::string gen_attn_f() {
     o("s_add_u32 s26, s26, 1");
     o("v_add_nc_u32 v12, s26, v1");
     o("v_min_u32 v12, s19, v12");                  // lim
-    o("v_lshlrev_b32 v3, 10, v1");
-    o("v_lshlrev_b32 v4, 10, v2");
+    o("v_mul_u32_u24 v3, " + S(QS) + ", v1");
+    o("v_mul_u32_u24 v4, " + S(KS) + ", v2");
     o("v_add_nc_u32 v4, " + S(LK) + ", v4");
-    o("v_lshlrev_b32 v6, 8, v1");
+    o("v_mul_u32_u24 v6, " + S(PS) + ", v1");
     o("v_add_nc_u32 v6, " + S(LP) + ", v6");
     o("v_lshl_add_u32 v5, v2, 3, v6");
     o("v_lshlrev_b32 v7, 5, v2");
     o("v_add_nc_u32 v7, " + S(LV) + ", v7");
-    o("v_lshlrev_b32 v8, 5, v0");
+    o("v_lshrrev_b32 v8, 3, v0");                  // K write: row tid >> 3 at 272, + (tid & 7) 32
+    o("v_mul_u32_u24 v8, " + S(KS) + ", v8");
+    o("v_lshl_add_u32 v8, v2, 5, v8");
+    o("v_lshlrev_b32 v236, 5, v0");                // V write: tid 32
     o("v_lshrrev_b32 v11, 3, v0");
     o("v_lshlrev_b32 v10, 5, v2");
     o("s_lshl_b32 s26, s16, 8");
@@ -86,8 +94,11 @@ inline std::string gen_attn_f() {
     o("s_lshl_b32 s26, s16, 11");
     o("v_add_nc_u32 v9, s26, v9");                 // + 2048 g
     for (int i = 0; i < 16; i++) o("global_load_dwordx4 " + vr(B + 4 * i, 4) + ", v9, s[0:1] offset:" + S(16 * i));
-    o("v_lshlrev_b32 v14, 8, v14");
-    o("v_lshl_add_u32 v14, v15, 7, v14");          // LDS: row 256 + half 128
+    o("v_and_b32 v13, 3, v14");                    // h
+    o("v_lshrrev_b32 v14, 2, v14");                // tt
+    o("v_lshl_add_u32 v14, v13, 5, v14");          // 32 h + tt
+    o("v_mul_u32_u24 v14, " + S(QS) + ", v14");
+    o("v_lshl_add_u32 v14, v15, 7, v14");          // + half 128
     o("s_waitcnt vmcnt(0)");
     for (int i = 0; i < 64; i++) o("v_mul_f32 " + v(B + i) + ", s7, " + v(B + i));
     for (int i = 0; i < 32; i++) o("v_cvt_pkrtz_f16_f32 " + v(B + i) + ", " + v(B + 2 * i) + ", " + v(B + 2 * i + 1));
@@ -109,8 +120,8 @@ inline std::string gen_attn_f() {
     o("s_barrier");                                // everyone done with the last chunk's K, V
     o("ds_write_b128 v8, " + vr(PF, 4) + " offset:" + S(LK));
     o("ds_write_b128 v8, " + vr(PF + 4, 4) + " offset:" + S(LK + 16));
-    o("ds_write_b128 v8, " + vr(PF + 8, 4) + " offset:" + S(LV));
-    o("ds_write_b128 v8, " + vr(PF + 12, 4) + " offset:" + S(LV + 16));
+    o("ds_write_b128 v236, " + vr(PF + 8, 4) + " offset:" + S(LV));
+    o("ds_write_b128 v236, " + vr(PF + 12, 4) + " offset:" + S(LV + 16));
     o("s_waitcnt lgkmcnt(0)");
     o("s_barrier");
     o("s_add_u32 s27, s24, 32");
@@ -124,8 +135,8 @@ inline std::string gen_attn_f() {
     // ---- scores: 16 steps of 8 dims; q rows 4 rg + i, k rows 4 lo + j (v4 + 256 j)
     auto qk_read = [&](int st) {
         const int b = B + 32 * (st % 2);
-        for (int i = 0; i < 4; i++) o("ds_read_b128 " + vr(b + 4 * i, 4) + ", v3 offset:" + S(LQ + 256 * i + 16 * st));
-        for (int j = 0; j < 4; j++) o("ds_read_b128 " + vr(b + 16 + 4 * j, 4) + ", v4 offset:" + S(256 * j + 16 * st));
+        for (int i = 0; i < 4; i++) o("ds_read_b128 " + vr(b + 4 * i, 4) + ", v3 offset:" + S(LQ + 32 * QS * i + 16 * st));
+        for (int j = 0; j < 4; j++) o("ds_read_b128 " + vr(b + 16 + 4 * j, 4) + ", v4 offset:" + S(8 * KS * j + 16 * st));
     };
     for (int x = 0; x < 16; x++) o("v_mov_b32 " + v(SC + x) + ", 0");
     qk_read(0);
@@ -154,10 +165,9 @@ inline std::string gen_attn_f() {
     o("s_cmp_le_u32 s27, s23");
     o("s_cbranch_scc1 nomask");
     o("v_subrev_nc_u32 v13, s24, v12");
-    o("v_lshlrev_b32 v14, 2, v2");
-    o("v_sub_nc_u32 v13, v13, v14");               // lim - c - 4 lo
+    o("v_sub_nc_u32 v13, v13, v2");                // lim - c - lo
     for (int j = 0; j < 4; j++) {
-        o("v_cmp_lt_i32 vcc_lo, " + S(j) + ", v13");
+        o("v_cmp_lt_i32 vcc_lo, " + S(8 * j) + ", v13");
         for (int i = 0; i < 4; i++) o("v_cndmask_b32 " + v(SC + 4 * i + j) + ", 0xff800000, " + v(SC + 4 * i + j) + ", vcc_lo");
     }
     k += "nomask:\n";
@@ -184,16 +194,16 @@ inline std::string gen_attn_f() {
         for (int d = 0; d < 16; d++) o("v_mul_f32 " + v(O + 16 * i + d) + ", " + v(O + 16 * i + d) + ", " + v(AL + i));
         o("v_cvt_pkrtz_f16_f32 v14, " + v(SC + 4 * i) + ", " + v(SC + 4 * i + 1));
         o("v_cvt_pkrtz_f16_f32 v15, " + v(SC + 4 * i + 2) + ", " + v(SC + 4 * i + 3));
-        o("ds_write_b64 v5, v[14:15] offset:" + S(64 * i));
+        o("ds_write_b64 v5, v[14:15] offset:" + S(32 * PS * i));
     }
     o("s_waitcnt lgkmcnt(0)");                     // P rows: this wave's own lanes
     // ---- out += p v: 8 steps of 4 positions; P rows 4 rg + i (v6 + 64 i), V rows (v7 + 256 pos)
     auto pv_read = [&](int st) {
         const int b = B + 40 * (st % 2);
-        for (int i = 0; i < 4; i++) o("ds_read_b64 " + vr(b + 2 * i, 2) + ", v6 offset:" + S(64 * i + 8 * st));
+        for (int i = 0; i < 4; i++) o("ds_read_b64 " + vr(b + 2 * i, 2) + ", v6 offset:" + S(32 * PS * i + 8 * st));
         for (int q = 0; q < 4; q++) {
-            o("ds_read_b128 " + vr(b + 8 + 8 * q, 4) + ", v7 offset:" + S(256 * (4 * st + q)));
-            o("ds_read_b128 " + vr(b + 12 + 8 * q, 4) + ", v7 offset:" + S(256 * (4 * st + q) + 16));
+            o("ds_read_b128 " + vr(b + 8 + 8 * q, 4) + ", v7 offset:" + S(256 * (st + 8 * q)));   // entry 4 st + q = position st + 8 q
+            o("ds_read_b128 " + vr(b + 12 + 8 * q, 4) + ", v7 offset:" + S(256 * (st + 8 * q) + 16));
         }
     };
     pv_read(0);
