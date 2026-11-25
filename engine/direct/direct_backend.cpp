@@ -97,8 +97,11 @@ public:
                 c = r_.prompt_chunk(n - i);
                 if (!r_.send_batch(tokens + i, c, pos0 + i, i + c == n)) return fail(err);
             }
+        // input tokens before the last only fill the K/V cache: no output
+        // mat-vec over the vocabulary or pick (round 111; Qwen3 0.6B's is
+        // 151936 x 1024, ~87 MB a token)
         for (; i < n; i++)
-            if (!r_.send(tokens[i], pos0 + i)) return fail(err);
+            if (!r_.send(tokens[i], pos0 + i, i + 1 == n)) return fail(err);
         for (int j = 1; j < k; j++)
             if (!r_.send(-1, pos0 + n - 1 + j)) return fail(err);
         if (!r_.wait_all()) return fail(err);

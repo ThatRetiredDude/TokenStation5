@@ -1012,15 +1012,19 @@ void Runner::build(int32_t id, int pos, uint64_t seq, pm4::Stream& s) {
         stamp(S_DOWN);
     }
     barrier();
+    // no_out_ (send(id, pos, false)): only the K/V cache wanted (a helper's
+    // input tokens before its last, round 111), so no output norm, output
+    // mat-vec or pick: logits, picked() and send(-1) after it are stale
     const Weight& outw = outw_;
-    if (opt.fused) mv(outw, bx_.gpu, blog_.gpu, Stage::Norm, blk(hp.n_layer, 0));
+    if (no_out_) {
+    } else if (opt.fused) mv(outw, bx_.gpu, blog_.gpu, Stage::Norm, blk(hp.n_layer, 0));
     else {
         norm(true, m_->out_norm);
         barrier();
         mv(outw, bxn_.gpu, blog_.gpu);
     }
-    barrier();
-    {
+    if (!no_out_) {
+        barrier();
         const uint32_t groups = (uint32_t)((V_ + 4095) / 4096);
         const uint32_t args[6] = {lo(blog_.gpu), hi(blog_.gpu), lo(bslot_.gpu), hi(bslot_.gpu), (uint32_t)(V_ / 4 - 1), groups * 256};
         const uint32_t g[3] = {groups, 1, 1};
@@ -1032,10 +1036,12 @@ void Runner::build(int32_t id, int pos, uint64_t seq, pm4::Stream& s) {
     nstamps_ = ns;
 }
 
-bool Runner::send(int32_t id, int pos) {
-    if (pos < 0 || pos >= ctx_) return false;
+bool Runner::send(int32_t id, int pos, bool out) {
+    if (pos < 0 || pos >= ctx_ || (!out && id < 0)) return false;
     pm4::Stream s;
+    no_out_ = !out;
     build(id, pos, seq_, s);
+    no_out_ = false;
     seq_++;
     return dv_->submit(s.w);
 }

@@ -625,7 +625,7 @@ namespace ts5::direct {
 // verify pass would keep; the helper's GPU time a token, and the wall time
 // of 4 chained draft tokens (the GPU picking each next one itself).
 int cmd_helper_test(int argc, char** argv) {
-    if (argc < 4) return fail("usage: helper-test MAIN.gguf DRAFT.gguf [tokens] [context]");
+    if (argc < 4) return fail("usage: helper-test MAIN.gguf DRAFT.gguf [tokens] [context] [profile]");
     const int n = argc > 4 ? std::atoi(argv[4]) : 128, ctx = argc > 5 ? std::atoi(argv[5]) : 4096;
     using clk = std::chrono::steady_clock;
     auto secs = [](clk::time_point a, clk::time_point b) { return std::chrono::duration<double>(b - a).count(); };
@@ -721,6 +721,32 @@ int cmd_helper_test(int argc, char** argv) {
     std::printf("\nhelper-test: overall %.1f%% agreement; kept per draft of 1/2/3/4: %.2f %.2f %.2f %.2f; helper %.3f ms a token\n",
                 100.0 * kept_all[1] / pos_all, (double)kept_all[1] / pos_all, (double)kept_all[2] / pos_all, (double)kept_all[3] / pos_all,
                 (double)kept_all[4] / pos_all, median(th_all) * 1e3);
+    // profile (round 111): where a helper token's time goes, step by step
+    // (TS5_DIRECT_STAMP=me for stamps that can be trusted), and one token's
+    // wall time sent and waited for alone (GPU + submit + wake-up)
+    if (argc > 6 && std::strcmp(argv[6], "profile") == 0) {
+        const int at = 64;
+        std::vector<double> acc, wall, gpu;
+        for (int rep = 0; rep < 24; rep++) {
+            const auto c0 = clk::now();
+            if (!H.send(1000 + rep, at) || !H.wait_all()) return fail(H.err());
+            wall.push_back(secs(c0, clk::now()));
+            gpu.push_back((H.t_end(H.sent() - 1) - H.t_start(H.sent() - 1)) / 100e6);
+        }
+        H.opt.profile = true;
+        int done = 0;
+        for (int rep = 0; rep < 16; rep++, done++) {
+            if (!H.send(1000 + rep, at) || !H.wait_all()) return fail(H.err());
+            H.add_profile(acc);
+        }
+        H.opt.profile = false;
+        double tot = 0;
+        for (double& v : acc) tot += v /= done;
+        std::printf("\nhelper-test profile: one token alone %.3f ms GPU, %.3f ms wall (medians of 24); profiled pass %.3f ms:\n", median(gpu) * 1e3,
+                    median(wall) * 1e3, tot * 1e3);
+        for (int i = 0; i < S_COUNT && i < (int)acc.size(); i++)
+            if (acc[i] > 0) std::printf("  %-18s %8.3f ms  %5.1f%%\n", kStepName[i], acc[i] * 1e3, 100 * acc[i] / tot);
+    }
     return 0;
 }
 

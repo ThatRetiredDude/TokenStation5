@@ -51,7 +51,7 @@ public:
 
     // Queues one token at `pos`: row `id` of the embeddings, or with id -1
     // the token the last one's argmax chose. Returns at once.
-    bool send(int32_t id, int pos);
+    bool send(int32_t id, int pos, bool out = true);   // out false: K/V only (no logits or pick)
     // Queues up to kBatch prompt tokens at pos0.. at once (ids given): one
     // pass over each weight matrix for all of them (mm_q4k.h, mm_q6k.h).
     // Only the last token's logits (and argmax) are kept, and only with
@@ -113,6 +113,7 @@ private:
     bool load(const std::string& src, Prog& p, std::string& err);
     Prog* mv_prog(const Weight& w, Stage st = Stage::None);
     void build(int32_t id, int pos, uint64_t seq, pm4::Stream& s);
+    bool no_out_ = false;   // build(): skip the output (send's out false)
     Prog* mm_prog(const Weight& w);
     Prog* xt_prog(int K);
     Prog* mt_prog(const Weight& w, int sk);
