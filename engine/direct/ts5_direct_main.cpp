@@ -895,7 +895,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (cmd == "gen-xt") {   // prints to_xT (prefill.h) for K columns and T tokens
-        std::fputs(ts5::direct::gen_to_xT(argc > 2 ? std::atoi(argv[2]) : 4096, argc > 3 ? std::atoi(argv[3]) : 16).c_str(), stdout);
+        std::fputs(ts5::direct::gen_to_xT(argc > 2 ? std::atoi(argv[2]) : 4096, argc > 3 ? std::atoi(argv[3]) : 16, argc > 4 ? std::atoi(argv[4]) : 256).c_str(), stdout);
         return 0;
     }
     if (cmd == "gen-ops") {   // prints rmsnorm, add_rmsnorm, qk_post and silu_mul

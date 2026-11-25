@@ -295,7 +295,8 @@ int cmd_xt_bench(int, char**) {
     for (int K : {4096, 12288}) {
         gfx10::Kernel k;
         std::string err;
-        if (!gfx10::assemble(gen_to_xT(K, T), k, &err)) { std::fprintf(stderr, "xt-bench: %s\n", err.c_str()); return 1; }
+      for (int NT : {256, 128}) {
+        if (!gfx10::assemble(gen_to_xT(K, T, NT), k, &err)) { std::fprintf(stderr, "xt-bench: %s\n", err.c_str()); return 1; }
         kfd::Buffer code;
         if (!dev.alloc(65536, kfd::Mem::Gtt, code)) return 1;
         std::memcpy(code.cpu, k.code.data(), k.code.size() * 4);
@@ -312,7 +313,7 @@ int cmd_xt_bench(int, char**) {
             const uint32_t args[10] = {(uint32_t)Y.gpu,   (uint32_t)(Y.gpu >> 32),   (uint32_t)xT.gpu, (uint32_t)(xT.gpu >> 32),
                                        (uint32_t)x32.gpu, (uint32_t)(x32.gpu >> 32), (uint32_t)x16.gpu, (uint32_t)(x16.gpu >> 32),
                                        (uint32_t)xh.gpu,  (uint32_t)(xh.gpu >> 32)};
-            const uint32_t g[3] = {(uint32_t)(K / (1024 / T)), 1, 1}, th[3] = {256, 1, 1};
+            const uint32_t g[3] = {(uint32_t)(K / (4 * NT / T)), 1, 1}, th[3] = {(uint32_t)NT, 1, 1};
             double gs;
             {
                 pm4::Stream s;
@@ -354,7 +355,7 @@ int cmd_xt_bench(int, char**) {
                         const float g = std::ldexp(fp16_to_fp32(h[(size_t)c * T + t]), e32[(size_t)(c / 32) * T + t]);
                         worst = std::max(worst, (double)std::fabs(g - v) / (std::fabs(v) + 1e-3) * 1e-2);
                     }
-                std::printf("to_xT K %d: worst error %.3g %s\n", K, worst, worst < 1e-4 ? "ok" : "WRONG");
+                std::printf("to_xT K %d, %d threads: worst error %.3g %s\n", K, NT, worst, worst < 1e-4 ? "ok" : "WRONG");
                 if (!(worst < 1e-4)) ok = false;
             }
             for (int chain = 0; chain < 2; chain++) {
@@ -373,12 +374,13 @@ int cmd_xt_bench(int, char**) {
                     if (rep >= 2) st.push_back(tot / 20);
                 }
                 std::sort(st.begin(), st.end());
-                std::printf("to_xT K %5d, %s, wait%s: %7.1f us a launch (%.1f GB/s moved)\n", K, gtt ? "GTT " : "VRAM", chain ? " + invalidate" : "",
+                std::printf("to_xT K %5d, %d threads, %s, wait%s: %7.1f us a launch (%.1f GB/s moved)\n", K, NT, gtt ? "GTT " : "VRAM", chain ? " + invalidate" : "",
                             st[st.size() / 2] * 1e6, 2.0 * T * K * 4 / st[st.size() / 2] / 1e9);
             }
             std::fflush(stdout);
         }
     }
+      }
     std::printf("xt-bench: %s\n", ok ? "to_xT matches the CPU" : "to_xT WRONG");
     return ok ? 0 : 1;
 }

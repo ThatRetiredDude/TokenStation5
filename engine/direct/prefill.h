@@ -19,13 +19,17 @@ namespace ts5::direct {
 // for all T tokens) so that |x16| < 16, with E (int8) in the low byte of xs16 and xs32
 // (they lose their last 8 bits, 2^-15 relative).
 // Arguments: s[0:1] Y, s[2:3] xT, s[4:5] xs32, s[6:7] xs16, s[8:9] x16;
-// s10 workgroup id. Grid: K / C workgroups of 256. T is 8 or 16.
-inline std::string gen_to_xT(int K, int T) {
+// s10 workgroup id. Grid: K / C workgroups of NT. T is 8 or 16.
+// NT 128 (T 16: C 32, a workgroup one exponent chunk): twice the workgroups
+// (round 62: K 4096 is only 64 of 256, ~13 us a launch on 40 CUs).
+inline std::string gen_to_xT(int K, int T, int NT = 256) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
-    const int LT = T == 16 ? 4 : 3, C = 1024 / T, TPT = 256 / T;   // columns a workgroup, threads a token
-    const int LTPT = 8 - LT;
+    const int LT = T == 16 ? 4 : 3, C = 4 * NT / T, TPT = NT / T;   // columns a workgroup, threads a token
+    const int LNT = NT == 128 ? 7 : 8, LTPT = LNT - LT;
+    if ((NT != 128 && NT != 256) || C < 32) return "";
+    auto lg = [](int v) { int l = 0; while ((1 << l) < v) l++; return l; };
     k += ".kernel to_xT\n.wave32\n.user_sgprs 10\n.tgid_x\n.lds 8256\n";
     o("v_lshrrev_b32 v1, " + S(LTPT) + ", v0");          // t
     o("v_and_b32 v2, " + S(TPT - 1) + ", v0");           // q: columns 4q .. 4q + 3 of the workgroup's
@@ -122,7 +126,7 @@ inline std::string gen_to_xT(int K, int T) {
     o("v_lshl_add_u32 v2, v1, 2, v2");
     for (int i = 0; i < 4; i++) o("ds_read_b32 v" + S(8 + i) + ", v2 offset:" + S(i * C * 4));
     for (int i = 0; i < 4; i++) o("ds_read_b32 v" + S(14 + i) + ", v2 offset:" + S(4096 + i * C * 4));
-    o("s_lshl_b32 s18, s10, 12");
+    o("s_lshl_b32 s18, s10, " + S(lg(C * T * 4)));
     o("s_add_u32 s12, s2, s18");
     o("s_addc_u32 s13, s3, 0");
     o("v_lshlrev_b32 v3, 4, v0");
@@ -130,7 +134,7 @@ inline std::string gen_to_xT(int K, int T) {
     o("global_store_dwordx4 v3, v[8:11], s[12:13]");
     o("v_cvt_pkrtz_f16_f32 v12, v14, v15");
     o("v_cvt_pkrtz_f16_f32 v13, v16, v17");
-    o("s_lshl_b32 s17, s10, 11");
+    o("s_lshl_b32 s17, s10, " + S(lg(C * T * 2)));
     o("s_add_u32 s12, s8, s17");
     o("s_addc_u32 s13, s9, 0");
     o("v_lshlrev_b32 v3, 3, v0");
