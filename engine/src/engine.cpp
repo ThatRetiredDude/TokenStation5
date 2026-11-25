@@ -267,6 +267,7 @@ bool Engine::set_drafter(Model &dm, Backend *db, std::string &err) {
 
 bool Engine::drafter_catch_up(int max_tokens) {
     if (!db_ || !drafter_ok_ || !dm_ || dcached_ >= cached_.size()) return false;
+    if (cached_.size() >= helper_bench_from_) return false;  // it would sit out there anyway
     // (the last token stays for the next draft's batch, as draft_model leaves it)
     size_t n = std::min(cached_.size() - 1 - std::min(dcached_, cached_.size() - 1), (size_t)max_tokens);
     if (dcached_ + n + 2 > (size_t)db_->n_ctx()) n = (size_t)db_->n_ctx() > dcached_ + 2 ? db_->n_ctx() - dcached_ - 2 : 0;
@@ -794,7 +795,16 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         // 144 KiB), and in round 117 at 2.9-6.6k context its 4.4-7.6 ms a
         // draft token against the 8B's ~15 made a 12-turn chat 8% slower
         // with 66% of its drafts kept (short contexts: ~1.9 against 13.6).
-        if (by_model && adapt && t_draft > 0 && t_fwd[1] > 0 && t_draft > helper_ratio() * t_fwd[1]) by_model = false;
+        // Round 118: on short contexts its cost is noisy around the line (A:
+        // 2.6-3.5 ms against 13.4), so the gate only judges from 1,024
+        // positions on, and remembers the depth where it tripped: later
+        // requests as deep skip the helper (and its probe) outright.
+        if (by_model && cached_.size() >= helper_bench_from_) by_model = false;
+        if (by_model && adapt && cached_.size() >= 1024 && t_draft > 0 && t_fwd[1] > 0 &&
+            t_draft > helper_ratio() * t_fwd[1]) {
+            by_model = false;
+            helper_bench_from_ = std::min(helper_bench_from_, cached_.size());
+        }
         int mk = room;
         bool dprobe = false;
         if (by_model && adapt) {

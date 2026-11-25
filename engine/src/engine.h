@@ -170,6 +170,7 @@ private:
     Model *dm_ = nullptr;
     std::unique_ptr<Backend> db_;
     size_t dcached_ = 0;        // the cached_ prefix the drafter has entered
+    size_t helper_bench_from_ = SIZE_MAX;  // depth where the helper cost too much a draft
     bool drafter_ok_ = true;    // false after a drafter forward fails
     std::vector<float> dl_;     // drafter logits, for backends without a view
     std::vector<int32_t> cu_;   // the drafter's catch-up batch, reused
