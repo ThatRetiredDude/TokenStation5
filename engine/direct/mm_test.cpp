@@ -15,6 +15,7 @@
 #include "kfd.h"
 #include "mm_q4k.h"
 #include "mm_q4k_sb.h"
+#include "mm_q4k_h.h"
 #include "mm_q6k_sb.h"
 #include "mm_q6k.h"
 #include "prefill.h"
@@ -58,14 +59,15 @@ int cmd_mm_q4k(int argc, char** argv) {
     std::printf("%s, T = %d tokens a pass, %d waves a workgroup%s\n", q6 ? "mm_q6k" : "mm_q4k", T, SPLIT,
                 EXP == 1 ? ", TIMING ONLY: no x loads" : EXP == 2 ? ", TIMING ONLY: no unpacking" : EXP == 3 ? ", TIMING ONLY: neither"
                 : EXP == 4 ? ", TIMING ONLY: x from LDS" : EXP == 5 ? ", TIMING ONLY: half the x bytes"
-                : EXP == 6 ? ", TIMING ONLY: x always the same 128 bytes" : EXP == 10 ? ", blocks split across the waves (sb)" : EXP == 11 ? ", blocks split across the waves, 2 rows a lane (sb)" : "");
+                : EXP == 6 ? ", TIMING ONLY: x always the same 128 bytes" : EXP == 10 ? ", blocks split across the waves (sb)" : EXP == 11 ? ", blocks split across the waves, 2 rows a lane (sb)"
+                : EXP == 12 ? ", packed f16 multiply-adds (mm_q4k_h; errors judged at 3e-3)" : "");
     for (const Shape& sh : shapes) {
         const int NB = sh.K / 256;
         if (NB % SPLIT || (q6 && (NB / SPLIT) % 2)) continue;
         const size_t rb = (size_t)NB * BB, wbytes = rb * sh.R;
         gfx10::Kernel k;
         std::string err;
-        if (!gfx10::assemble(q6 ? (EXP == 10 ? gen_mm_q6k_sb(sh.K, T) : gen_mm_q6k(sh.K, T, SPLIT)) : EXP == 10 ? gen_mm_q4k_sb(sh.K, T) : EXP == 11 ? gen_mm_q4k_sb(sh.K, T, 2) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
+        if (!gfx10::assemble(q6 ? (EXP == 10 ? gen_mm_q6k_sb(sh.K, T) : gen_mm_q6k(sh.K, T, SPLIT)) : EXP == 10 ? gen_mm_q4k_sb(sh.K, T) : EXP == 11 ? gen_mm_q4k_sb(sh.K, T, 2) : EXP == 12 ? gen_mm_q4k_h(sh.K, T) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
         kfd::Buffer code, W, xT, xs, Y;
         const size_t cb = (k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
         if (!dev.alloc(cb, kfd::Mem::Gtt, code) || !dev.alloc(wbytes + 4096, kfd::Mem::Gtt, W) ||
@@ -97,6 +99,11 @@ int cmd_mm_q4k(int argc, char** argv) {
         float* xsum = (float*)xs.cpu;
         for (int c = 0; c < sh.K; c++)
             for (int t = 0; t < T; t++) xt[(size_t)c * T + t] = X[(size_t)t * sh.K + c];
+        if (EXP == 12) {   // the f16 kernel reads x16: a column's tokens in pairs, f16
+            uint16_t* x16 = (uint16_t*)xT.cpu;
+            for (int c = 0; c < sh.K; c++)
+                for (int t = 0; t < T; t++) x16[(size_t)c * T + t] = fp32_to_fp16(X[(size_t)t * sh.K + c]);
+        }
         for (int s = 0; s < sh.K / SUB; s++)
             for (int t = 0; t < T; t++) {
                 float a = 0;
@@ -135,10 +142,10 @@ int cmd_mm_q4k(int argc, char** argv) {
         for (size_t i = 0; i < (size_t)T * sh.R; i++) {
             double e = std::fabs(y[i] - ref[i]) / (mag[i] > 0 ? mag[i] : 1);
             if (!(e == e)) e = 1e9;
-            if (e > 1e-5 && bad++ == 0) first = i;
+            if (e > (EXP == 12 ? 3e-3 : 1e-5) && bad++ == 0) first = i;   // f16: x rounded, sub-block sums in f16
             worst = std::max(worst, e);
         }
-        if (bad && (!EXP || EXP == 10 || EXP == 11)) {
+        if (bad && (!EXP || EXP >= 10)) {
             all_ok = false;
             std::printf("  %s: WRONG, %zu of %zu values, worst %.3g, first token %zu row %zu: gpu %g cpu %g\n", sh.name, bad,
                         (size_t)T * sh.R, worst, first / sh.R, first % sh.R, y[first], ref[first]);
@@ -173,7 +180,7 @@ int cmd_mm_q4k(int argc, char** argv) {
                     k.vgprs, k.sgprs);
         std::fflush(stdout);
     }
-    std::printf("%s: %s\n", q6 ? "mm-q6k" : "mm-q4k", EXP && EXP != 10 && EXP != 11 ? "timing only, values not checked" : all_ok ? "all values match the CPU" : "SOME VALUES WRONG");
+    std::printf("%s: %s\n", q6 ? "mm-q6k" : "mm-q4k", EXP && EXP < 10 ? "timing only, values not checked" : all_ok ? "all values match the CPU" : "SOME VALUES WRONG");
     return all_ok ? 0 : 1;
 }
 
