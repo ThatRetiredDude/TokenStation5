@@ -22,7 +22,9 @@
 
 namespace ts5::direct {
 
-inline std::string gen_mm_q4k_h(int K, int T) {
+// exp (timing only, wrong values): 1 no x loads in the loop, 2 no unpacking
+// (the quant dword used as the f16 pair), 3 neither.
+inline std::string gen_mm_q4k_h(int K, int T, int exp = 0) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
@@ -108,21 +110,25 @@ inline std::string gen_mm_q4k_h(int K, int T) {
     for (int st = 0; st < 16; st++) {
         const int jj = st / 8, dw = st % 8;
         o("s_waitcnt lgkmcnt(0)");
-        if (st + 1 < 16) sload(buf(st + 1), 4 * P, "s[12:13]", xoff(st + 1));
+        if (exp & 1) {}
+        else if (st + 1 < 16) sload(buf(st + 1), 4 * P, "s[12:13]", xoff(st + 1));
         else sload(buf(0), 4 * P, "s[12:13]", 256 * P * 4);   // the next block's first step
         if (dw == 6) sload(SXS, T, "s[14:15]", jj * T * 4);   // the sub-block's sums, for its end
         const std::string q = "v" + S(A + 4 + dw), u = "v" + S(U);
-        if (jj) {
+        if (exp & 2) {}
+        else if (jj) {
             o("v_lshrrev_b32 " + u + ", 4, " + q);
             o("v_and_b32 " + u + ", 0x0f0f0f0f, " + u);
         } else {
             o("v_and_b32 " + u + ", 0x0f0f0f0f, " + q);
         }
-        for (int b = 0; b < 4; b++) o("v_cvt_f32_ubyte" + S(b) + " v" + S(U + 1 + b) + ", " + u);
-        o("v_cvt_pkrtz_f16_f32 v" + S(U + 5) + ", v" + S(U + 1) + ", v" + S(U + 2));
-        o("v_cvt_pkrtz_f16_f32 v" + S(U + 6) + ", v" + S(U + 3) + ", v" + S(U + 4));
+        if (!(exp & 2)) {
+            for (int b = 0; b < 4; b++) o("v_cvt_f32_ubyte" + S(b) + " v" + S(U + 1 + b) + ", " + u);
+            o("v_cvt_pkrtz_f16_f32 v" + S(U + 5) + ", v" + S(U + 1) + ", v" + S(U + 2));
+            o("v_cvt_pkrtz_f16_f32 v" + S(U + 6) + ", v" + S(U + 3) + ", v" + S(U + 4));
+        }
         for (int c = 0; c < 4; c++) {
-            const std::string w = "v" + S(U + 5 + c / 2);
+            const std::string w = exp & 2 ? q : "v" + S(U + 5 + c / 2);
             const bool hi = c & 1;
             for (int p = 0; p < P; p++) {
                 const std::string x = "s" + S(buf(st) + c * P + p), d = "v" + S(TMP + p);
