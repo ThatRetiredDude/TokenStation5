@@ -163,6 +163,8 @@ bool parse(int argc, char **argv, Args &a) {
     if (a.backend == "direct") a.backend = "soknee";   // the engine's old name
 #ifdef TS5_VULKAN
     if (a.backend.empty()) a.backend = "vk";
+#elif defined(TS5_DIRECT)
+    if (a.backend.empty()) a.backend = "soknee";
 #else
     if (a.backend.empty()) a.backend = "cpu";
 #endif

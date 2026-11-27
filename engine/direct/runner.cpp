@@ -167,16 +167,17 @@ struct Pace {
     // Round 115: at MainSoC 77 (under the old knee of 78) a 7k chat prefill
     // still went 76 -> 91.25 C in ~0.25 s. Round 116: from 70 at half a
     // degree a degree (77: 85.5 / 79.5) the 15-minute soak ran through
-    // (peak 90.0) but the 12-turn chat (MainSoC <= 71) lost 1.7%. So from
-    // 74, a degree a degree (77: 86 / 80, 83: 81 / 75): the margin where it
-    // was needed, nothing below.
-    double soc_knee = 74, soc_slope = 1, soc_max = 8;
+    // (peak 90.0) but the 12-turn chat (MainSoC <= 71) lost 1.7%. Live TS5 OS
+    // verification caught back-to-back pp4096 spiking to 91.75 C at 89/83 with
+    // knee 74, so trim long-prompt ceiling to 87.5/81.5 and knee to 72 to keep
+    // Tctl strictly under the 91 C safety line while leaving cold short bursts alone.
+    double soc_knee = 72, soc_slope = 1, soc_max = 8;
     double hot = 83, cool = 75;   // round 82: 80/70 gave 873-903 tok/s, 83/75 928 at Tctl max 78.75
     // Round 93: unpaced, pp8192 settles at 85.75-86.5 C and runs a steady
     // ~602 tok/s; at 88/82 one 50 ms spike to 88 cost a pause and 12%
-    // (527). So 89/83, a pause needs two layers in a row at HOT or one at
-    // HOT + 1 (TS5_DIRECT_HOT_LONG / COOL_LONG still override).
-    double hot_long = 89, cool_long = 83;   // round 85: 88/82 pp2048 783 (83/75: 688)
+    // (527). A pause needs two layers in a row at HOT or one at HOT + 1
+    // (TS5_DIRECT_HOT_LONG / COOL_LONG still override).
+    double hot_long = 87.5, cool_long = 81.5;
     Pace() {
         const char* e = std::getenv("TS5_DIRECT_PACE");
         if (e && std::atoi(e) == 0) return;
