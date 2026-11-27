@@ -737,16 +737,16 @@ bool Runner::prep_weights(std::string& err) {
         const auto t0 = std::chrono::steady_clock::now();
         if (!dv_->alloc((total + (64 << 10) + 4095) & ~(size_t)4095, kfd::Mem::Gtt, pbuf_)) { err = dv_->err() + " (reshaped weights)"; return false; }
         // A cache of the reshaped bytes (round 102: 12.2 s to requantize the
-        // 0.6B on the PS5): $XDG_CACHE_HOME or ~/.cache, ts5/soknee/<model>-
-        // <size>-<mtime>-v1.bin. TS5_SOKNEE_CACHE=0: no cache.
+        // 0.6B on the PS5): $XDG_CACHE_HOME or ~/.cache, ts5/doorbell/<model>-
+        // <size>-<mtime>-v1.bin. TS5_DOORBELL_CACHE=0: no cache.
         std::string cpath;
         {
-            const char* off = std::getenv("TS5_SOKNEE_CACHE");
+            const char* off = std::getenv("TS5_DOORBELL_CACHE");
             const char* xdg = std::getenv("XDG_CACHE_HOME");
             const char* home = std::getenv("HOME");
             struct stat st;
             if (!(off && std::atoi(off) == 0) && ((xdg && *xdg) || (home && *home)) && stat(m_->gguf.path.c_str(), &st) == 0) {
-                const std::string dir = (xdg && *xdg) ? std::string(xdg) + "/ts5/soknee" : std::string(home) + "/.cache/ts5/soknee";
+                const std::string dir = (xdg && *xdg) ? std::string(xdg) + "/ts5/doorbell" : std::string(home) + "/.cache/ts5/doorbell";
                 const size_t sl = m_->gguf.path.find_last_of('/');
                 const std::string base = sl == std::string::npos ? m_->gguf.path : m_->gguf.path.substr(sl + 1);
                 cpath = dir + "/" + base + "-" + std::to_string((long long)st.st_size) + "-" + std::to_string((long long)st.st_mtime) + "-v1.bin";

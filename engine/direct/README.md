@@ -1,12 +1,17 @@
-# SoKnee
+# Doorbell
 
-SoKnee (the directory keeps its working name, `direct`) is ts5 driving the PS5's GPU (GFX10.1, gfx1013) itself: our own machine code,
+Doorbell (the directory keeps its working name, `direct`) is ts5 driving the PS5's GPU (GFX10.1, gfx1013) itself: our own machine code,
 our own command packets, and the kernel's amdgpu driver only for memory and
-starting the chip. No Vulkan, Mesa, RADV, ACO, LLVM or SPIR-V at run time.
+starting the chip. No Vulkan, Mesa, RADV, ROCm/HIP, ACO, LLVM or SPIR-V at run time.
 It is the engine for TokenStation5 OS, and the Vulkan engine stays as the
 reference every kernel here has to match.
 
-Pick it with `ts5 bench --engine soknee` (or `--backend soknee`; the old
+**Why "Doorbell"?** Instead of going through half a dozen other stacks (`llama.cpp`,
+Vulkan, Mesa/RADV, ROCm, LLVM, SPIR-V), you can hand raw machine code straight to the
+GPU's command queue and wake the chip by writing to its hardware **doorbell** register.
+In GPU architecture, that's called ringing the doorbell — so we named the engine **Doorbell**.
+
+Pick it with `ts5 bench --engine doorbell` (or `--backend doorbell`; the old
 name `direct` still works).
 
 | Part | Status |

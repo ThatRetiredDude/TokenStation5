@@ -340,7 +340,7 @@ void Engine::draft_model(int32_t tok, int k, std::vector<int32_t> &out) {
     catch_ms_ = 0;
     catch_n_ = 0;
     if (db_->greedy_drafts()) {
-        // All k drafts in one go on the drafter's GPU (SoKnee round 103: 4
+        // All k drafts in one go on the drafter's GPU (Doorbell round 103: 4
         // chained drafts 7.1 ms against 2.1-2.2 ms each with a host round
         // trip and argmax between). A real backlog first, timed as catch-up.
         const int32_t *in = cu_.data();
@@ -829,7 +829,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
             mk = best_k(room, by_drafter.p(0.6f), per, catch_per * behind / 16);
             // No probe while the drafter is far behind (a long prompt): a
             // probe then only catches it up one 256-token chunk and drafts
-            // nothing (SoKnee round 103: 10-18 probes on 7k-token prompts
+            // nothing (Doorbell round 103: 10-18 probes on 7k-token prompts
             // cost 0.2-1.7 s a request and never drafted).
             if (mk == 0 && step >= dprobe_next && behind <= 512) {
                 mk = std::min(room, 2);

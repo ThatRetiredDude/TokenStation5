@@ -1,6 +1,6 @@
 // helper_prep: reshaping a small helper model's weights (Qwen3 0.6B) at load
 // time into what the direct engine's kernels take, for speculative decoding's
-// draft model on SoKnee. Nothing here has to match any other engine bit for
+// draft model on Doorbell. Nothing here has to match any other engine bit for
 // bit: a helper only proposes tokens, and the main model checks every one.
 //
 // - Q6_K tensors whose rows the Q6_K kernels can't take (1024 and 3072

@@ -50,7 +50,7 @@ if(TS5_VULKAN)
 endif()
 
 # The direct engine (engine/direct): ts5's own GPU kernels through /dev/kfd,
-# for the PS5 (--backend soknee). Linux only.
+# for the PS5 (--backend doorbell). Linux only.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   option(TS5_DIRECT "Build the direct engine backend" ON)
 else()

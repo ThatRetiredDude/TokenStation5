@@ -1,4 +1,4 @@
-// ts5's SoKnee backend (--backend soknee, or the old name direct): the direct engine's runner
+// ts5's Doorbell backend (--backend doorbell, or the old name direct): the direct engine's runner
 // behind the Backend interface, for Qwen3 models of Q4_K and Q6_K weights on
 // the PS5's GPU. A prompt goes up to Runner::kBig tokens a pass over the weights
 // (send_batch, prompt_chunk); generation and short tails one token at a time,
@@ -18,7 +18,7 @@ namespace {
 
 class DirectBackend : public Backend {
 public:
-    const char *name() const override { return "soknee"; }
+    const char *name() const override { return "doorbell"; }
     // share: the main model's backend, for a helper (draft) model on the
     // same GPU queue and address space (Runner::init's share).
     bool init(Model &m, int n_ctx, std::string &err, DirectBackend *share = nullptr) {
@@ -67,7 +67,7 @@ public:
     bool forward_in_place(const int32_t *tokens, int n, int pos0, bool all_logits, std::string &err) override {
         if (all_logits && n > 1) {
             if (!r_.verify_ok() || n > direct::Runner::kVerify) {
-                err = "SoKnee verifies at most " + std::to_string(r_.verify_ok() ? direct::Runner::kVerify : 1) + " tokens a pass";
+                err = "Doorbell verifies at most " + std::to_string(r_.verify_ok() ? direct::Runner::kVerify : 1) + " tokens a pass";
                 return false;
             }
             if (pos0 < 0 || pos0 + n > r_.n_ctx()) {
@@ -136,7 +136,7 @@ Backend *make_direct_backend(Model &m, int n_ctx, std::string &err) {
 Backend *make_direct_helper(Model &m, int n_ctx, Backend *main, std::string &err) {
     DirectBackend *mb = dynamic_cast<DirectBackend *>(main);
     if (!mb) {
-        err = "the main model isn't on SoKnee";
+        err = "the main model isn't on Doorbell";
         return nullptr;
     }
     std::unique_ptr<DirectBackend> b(new DirectBackend);

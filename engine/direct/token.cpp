@@ -618,7 +618,7 @@ namespace ts5::direct {
 
 // ts5-direct helper-test MAIN.gguf DRAFT.gguf [tokens] [context]: a helper
 // (draft) model on the main model's GPU queue (round 102: Qwen3 0.6B beside
-// 8B on SoKnee, its weights reshaped at load). For a few chat prompts: the
+// 8B on Doorbell, its weights reshaped at load). For a few chat prompts: the
 // helper's prompt time; the main model's greedy answer, with the helper fed
 // the same tokens (teacher forced) and its greedy pick at each position set
 // against the main model's next token: the share of 1..4-token drafts a

@@ -103,8 +103,9 @@ int usage() {
             "       ts5 fetch URL FILE [--sha256 HEX] | ts5 peak [--device N] [--gib G]\n"
             "       ts5 helpers -m model.gguf --helper FILE...  (which files could draft for the model)\n"
             "  -c N|auto      context length (default 8192; auto: what fits in GPU memory)\n"
-            "  --backend B    vk, cpu or soknee (our own PS5 GPU engine, no Vulkan: Qwen3, Q4_K_M;\n"
-            "                 'direct' also works). --engine is the same option.\n"
+            "  --backend B    vk, cpu or doorbell (bare-metal AMD GPU engine, no Vulkan/ROCm/LLVM;\n"
+            "                 talks straight to /dev/kfd and the hardware doorbell; 'direct' also works).\n"
+            "                 --engine is the same option.\n"
             "  --device N     Vulkan device index\n"
             "  serve: --host ADDR --port N\n"
             "  run:   -p PROMPT [--chat] [-n N] [--temp T]\n"
@@ -160,11 +161,11 @@ bool parse(int argc, char **argv, Args &a) {
         else ok = false;
     }
     if (!ok || a.model.empty()) return false;
-    if (a.backend == "direct") a.backend = "soknee";   // the engine's old name
+    if (a.backend == "direct") a.backend = "doorbell";   // the engine's old name
 #ifdef TS5_VULKAN
     if (a.backend.empty()) a.backend = "vk";
 #elif defined(TS5_DIRECT)
-    if (a.backend.empty()) a.backend = "soknee";
+    if (a.backend.empty()) a.backend = "doorbell";
 #else
     if (a.backend.empty()) a.backend = "cpu";
 #endif
@@ -595,13 +596,13 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
 
     double t0 = now_ms();
     Backend *be = nullptr;
-    if (a.backend == "soknee") {
+    if (a.backend == "doorbell") {
 #ifdef TS5_DIRECT
         if (a.n_ctx <= 0) a.n_ctx = 8192;
         model.use_context(a.n_ctx);
-        // The draft model runs on SoKnee too, on the main model's GPU queue
-        // (make_direct_helper; round 102). TS5_SOKNEE_VK_HELPER=1 runs it on
-        // Vulkan beside SoKnee instead (round 101's measurement).
+        // The draft model runs on Doorbell too, on the main model's GPU queue
+        // (make_direct_helper; round 102). TS5_DOORBELL_VK_HELPER=1 runs it on
+        // Vulkan beside Doorbell instead (round 101's measurement).
         be = make_direct_backend(model, a.n_ctx, err);
 #else
         err = "built without the direct engine";
@@ -662,7 +663,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
                 dmodel.use_context(be->n_ctx());
                 db = make_cpu_backend(dmodel, be->n_ctx());
             }
-        } else if (a.backend == "soknee" && !(getenv("TS5_SOKNEE_VK_HELPER") && atoi(getenv("TS5_SOKNEE_VK_HELPER")) == 1)) {
+        } else if (a.backend == "doorbell" && !(getenv("TS5_DOORBELL_VK_HELPER") && atoi(getenv("TS5_DOORBELL_VK_HELPER")) == 1)) {
 #ifdef TS5_DIRECT
             dmodel.use_context(be->n_ctx());
             db = make_direct_helper(dmodel, be->n_ctx(), be, derr);

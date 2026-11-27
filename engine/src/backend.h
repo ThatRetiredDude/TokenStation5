@@ -47,7 +47,7 @@ public:
     // logits_view() at once (all_logits).
     virtual int in_place_rows() const { return 1 << 30; }
     // Greedy drafting on the device (a drafter that picks each next token on
-    // its GPU, SoKnee): enter tokens[0..n-1] at pos0.., then k - 1 more, each
+    // its GPU, Doorbell): enter tokens[0..n-1] at pos0.., then k - 1 more, each
     // the argmax after the one before, with no host round trip between; out
     // gets the k argmaxes in order. Only when greedy_drafts().
     virtual bool greedy_drafts() const { return false; }
@@ -64,11 +64,11 @@ public:
     // The most tokens a forward call without logits may take and still
     // write each position's K/V bit for bit as a call of one token would
     // (TS5_KV_REPAIR replays shorter calls this many at a time, longer
-    // ones as they were made). SoKnee: 3 (from 4 its prompt kernels, whose
+    // ones as they were made). Doorbell: 3 (from 4 its prompt kernels, whose
     // rounding differs).
     virtual int exact_call_max() const { return 8; }
     // A generation step's call of several tokens (speculative decoding's
-    // verify) writes K/V bit for bit as one token at a time would (SoKnee).
+    // verify) writes K/V bit for bit as one token at a time would (Doorbell).
     virtual bool verify_bit_exact() const { return false; }
     // A backend whose state only goes forward (rewind_limit() 0: Qwen3.5's
     // linear layers) keeps state_slots() copies of it, so a request that
@@ -83,7 +83,7 @@ public:
     virtual bool restore_state(int, std::string &) { return false; }
     virtual KvType kv_type() const { return KvType::F32; }
     // A hint before a prompt goes in as several forward calls (the server and
-    // bench feed 256 tokens a call): the prompt ends at position `end`. SoKnee
+    // bench feed 256 tokens a call): the prompt ends at position `end`. Doorbell
     // paces its heat by the whole prompt's length, not by one call's.
     virtual void expect_prompt(int end) { (void)end; }
     // Since the last call, a few lines of text: with TS5_PROFILE set (vk),
@@ -103,7 +103,7 @@ Backend *make_cpu_backend(const Model &m, int n_ctx, KvType kv = KvType::F32);
 // ts5's own kernels, no Vulkan. Qwen3 with Q4_K / Q6_K weights only; loads
 // `m` (open, not loaded) itself. Null with why in err.
 Backend *make_direct_backend(Model &m, int n_ctx, std::string &err);
-// A draft (helper) model beside a SoKnee main backend, on its GPU queue: Qwen3
+// A draft (helper) model beside a Doorbell main backend, on its GPU queue: Qwen3
 // 0.6B's shapes too (1024 / 3072 columns, 16 query heads; weights reshaped at
 // load). `main` must be make_direct_backend's and outlive it.
 Backend *make_direct_helper(Model &m, int n_ctx, Backend *main, std::string &err);
